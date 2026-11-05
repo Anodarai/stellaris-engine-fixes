@@ -1,0 +1,3 @@
+mimalloc 3.6.1 (dev3), copied from H:\dev\LargePageInjectorMods\Lib\Submodules\mimalloc
+commit 6a6377633495a5f756f87b47b9659ead0cf92bf1 of https://github.com/KeinNiemand/mimalloc (a fork of microsoft/mimalloc dev3)
+Only include/, src/ and LICENSE; built as one unit from src/static.c.

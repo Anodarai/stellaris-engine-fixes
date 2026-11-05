@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: call build.bat
+
+      # locate_test is left out: it needs a copy of stellaris.exe.
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $tests = @(
+            "build/natsort_test.exe"
+            "build/pathcache_test.exe"
+            "build/income_test.exe"
+            "build/proxy_test.exe"
+            "build/alloctest/alloc_host.exe"
+          )
+
+          foreach ($test in $tests) {
+            & "./$test"
+            if ($LASTEXITCODE -ne 0) {
+              throw "$test failed"
+            }
+          }
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          $name = "stellaris-engine-fixes-${{ github.ref_name }}.zip"
+          Compress-Archive -Path `
+            "build/winmm/winmm.dll", `
+            "build/winmm/stellaris-engine-fixes.ini" `
+            -DestinationPath $name
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            "stellaris-engine-fixes-$tag.zip" `
+            --verify-tag `
+            --title $tag `
+            --generate-notes

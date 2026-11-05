@@ -91,7 +91,8 @@ They act on the AI only and don't change saves. Single player; multiplayer is un
 
 ## Build
 
-Needs Visual Studio 2022 with the C++ x64 tools.
+Needs Visual Studio (2022 or later, any edition, or the Build Tools) with the C++ x64 tools;
+`build.bat` finds it with `vswhere`.
 
 ```bat
 build.bat
@@ -99,9 +100,9 @@ build.bat
 
 ## Install
 
-Close the game first. Copy `build\winmm\winmm.dll` and `build\winmm\stellaris-engine-fixes.ini`
-into the folder that holds `stellaris.exe`. The DLL writes `stellaris-engine-fixes.log` next to
-itself.
+Close the game first. Take `winmm.dll` and `stellaris-engine-fixes.ini` from a release zip, or
+build them (`build\winmm\`), and copy both into the folder that holds `stellaris.exe`. The DLL
+writes `stellaris-engine-fixes.log` next to itself.
 
 ## Uninstall
 

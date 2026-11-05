@@ -2,7 +2,14 @@
 rem Builds build\winmm\winmm.dll (install it with stellaris-engine-fixes.ini into the Stellaris
 rem folder) with MSVC x64, plus the test programs.
 setlocal
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul || exit /b 1
+rem Visual Studio (Community, Professional, Enterprise or Build Tools) with the C++ x64 tools.
+set "VS_DIR="
+for /f "usebackq delims=" %%I in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS_DIR=%%I"
+if not defined VS_DIR (
+  echo Visual Studio with the C++ x64 tools was not found.
+  exit /b 1
+)
+call "%VS_DIR%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul || exit /b 1
 cd /d "%~dp0"
 for %%p in (winmm alloctest) do (
   if not exist build\%%p mkdir build\%%p

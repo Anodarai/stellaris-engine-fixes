@@ -44,7 +44,8 @@ jobs:
           $name = "stellaris-engine-fixes-${{ github.ref_name }}.zip"
           Compress-Archive -Path `
             "build/winmm/winmm.dll", `
-            "build/winmm/stellaris-engine-fixes.ini" `
+            "build/winmm/stellaris-engine-fixes.ini", `
+            "mods" `
             -DestinationPath $name
 
       - name: Publish release

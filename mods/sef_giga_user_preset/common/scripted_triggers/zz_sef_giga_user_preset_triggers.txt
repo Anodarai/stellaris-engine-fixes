@@ -1,0 +1,5 @@
+# Gigastructures enables its menu's "User preset" button when this trigger is false: the user preset
+# submod's switch. Scripted triggers: the last definition wins, so this file loads after Gigastructures'.
+has_giga_preset_mod = {
+	always = no
+}

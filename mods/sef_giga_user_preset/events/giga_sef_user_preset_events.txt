@@ -1,0 +1,34 @@
+# The menu's "User preset" button fires giga_preset.1 on the host. Gigastructures defines it as an empty
+# placeholder in events/zzz_giga_compat_placeholder_events.txt; the first definition of an event wins,
+# and this file's name sorts before that one.
+namespace = giga_preset
+
+country_event = {
+	id = giga_preset.1
+	hide_window = yes
+	is_triggered_only = yes
+
+	immediate = {
+		if = {
+			limit = { log = "@sef:global.has giga_user_preset" }
+			# Runs the saved lines at the end of the frame, with the console's effect command.
+			log = "@sef:global.run giga_user_preset"
+		}
+		else = {
+			country_event = { id = giga_preset.2 }
+		}
+	}
+}
+
+# No preset saved yet, or stellaris-engine-fixes is not installed.
+country_event = {
+	id = giga_preset.2
+	title = sef_giga_user_preset.2.name
+	desc = sef_giga_user_preset.2.desc
+	picture = GFX_evt_alien_nature
+	is_triggered_only = yes
+
+	option = {
+		name = OK
+	}
+}

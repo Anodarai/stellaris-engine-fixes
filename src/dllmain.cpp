@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <share.h>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -31,6 +32,7 @@
 #include "locate.h"
 #include "natsort.h"
 #include "pathcache.h"
+#include "pdxstore.h"
 
 
 // Exports of the system DLL we stand in for, forwarded to the real one.
@@ -164,6 +166,15 @@ uint8_t* InstallJumpHook(uint8_t* target, size_t stolen, void* hook) {
     FlushInstructionCache(GetCurrentProcess(), target, stolen);
     return tramp;
 }
+
+// Script storage ("Script storage", below), called from the log, save and tick hooks earlier on.
+bool g_storeOn = false;
+void StoreEffect(const char* text, uint8_t* scope);
+bool StoreTrigger(const char* text, uint8_t* scope);
+void StoreFrame();
+void StoreSaved(const char* path);
+void StoreLoading(const char* path);
+void StoreNewGame();
 
 // Points a vtable slot that holds `expected` at `hook`.
 bool SwapVtableSlot(uintptr_t* slot, const uint8_t* expected, void* hook) {
@@ -1673,6 +1684,7 @@ uint64_t __fastcall CheckTickHook(uint8_t* idler, float frameSeconds) {
     if (g_renderDepth != 0 || GetCurrentThreadId() != g_mainThread) return g_origCheckTick(idler, frameSeconds);
     g_lastFrame = Now();
     BenchFrame(idler);
+    StoreFrame();
     int batch = TickBatch(idler);
     if (batch == 0) return g_origCheckTick(idler, frameSeconds);
     // CheckTick queues max(min(NUM_COMMANDS_PER_TURN, 10), g_nTicksPerTurn) ticks; the define goes
@@ -2569,6 +2581,620 @@ std::string IncomeSummary() {
 }
 
 // ===========================================================================
+// Script storage: the hooks it needs (log effect and trigger, saves and loads)
+
+// A CString's text into `out` (NUL-terminated, cut to fit); returns its full length.
+int32_t CopyGameString(const game::String* text, char* out, int32_t size) {
+    size_t length = text->size;
+    if (length > 0x7FFFFFFF) length = 0;
+    if (size > 0) {
+        size_t n = length < static_cast<size_t>(size - 1) ? length : static_cast<size_t>(size - 1);
+        memcpy(out, text->data(), n);
+        out[n] = '\0';
+    }
+    return static_cast<int32_t>(length);
+}
+
+// A CString over `text` that nobody frees: inline when it fits, else kind 1 pointing at `text`,
+// which must outlive it.
+game::String BorrowString(const char* text) {
+    size_t size = strlen(text);
+    game::String s{};
+    if (size <= 0xF) {
+        memcpy(s.buf, text, size);
+        s.cap = 0xF;
+    } else {
+        s.kind = 1;
+        s.ptr = const_cast<char*>(text);
+        s.cap = size;
+    }
+    s.size = size;
+    return s;
+}
+
+// ---- The log effect and trigger: "@sef:..." ----
+
+using LogEffectFn = void(__fastcall*)(uint8_t* effect, uint8_t* scope);
+using LogTriggerFn = bool(__fastcall*)(uint8_t* trigger, uint8_t* scope);
+LogEffectFn g_origLogEffect = nullptr;
+LogTriggerFn g_origLogTrigger = nullptr;
+size_t g_logEffectText = 0, g_logTriggerText = 0;
+
+// A log effect's or trigger's text after "@sef:", in `buf`; false when it doesn't start so.
+bool StoreCall(const uint8_t* object, size_t textOffset, char* buf, size_t size) {
+    __try {
+        const auto* text = reinterpret_cast<const game::String*>(object + textOffset);
+        if (text->size < 5 || text->size >= size || memcmp(text->data(), "@sef:", 5) != 0) return false;
+        memcpy(buf, text->data() + 5, text->size - 5);
+        buf[text->size - 5] = '\0';
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void __fastcall LogEffectHook(uint8_t* effect, uint8_t* scope) {
+    char buf[1024];
+    if (g_storeOn && StoreCall(effect, g_logEffectText, buf, sizeof(buf))) return StoreEffect(buf, scope);
+    g_origLogEffect(effect, scope);
+}
+
+bool __fastcall LogTriggerHook(uint8_t* trigger, uint8_t* scope) {
+    char buf[1024];
+    if (g_storeOn && StoreCall(trigger, g_logTriggerText, buf, sizeof(buf))) return StoreTrigger(buf, scope);
+    return g_origLogTrigger(trigger, scope);
+}
+
+bool HookLogs(uint8_t* effect, size_t effectText, uint8_t* trigger, size_t triggerText) {
+    g_logEffectText = effectText;  // before the hooks can run
+    g_logTriggerText = triggerText;
+    uint8_t* e = InstallJumpHook(effect, locate::kLogScriptStolenBytes, reinterpret_cast<void*>(&LogEffectHook));
+    if (!e) return false;
+    g_origLogEffect = reinterpret_cast<LogEffectFn>(e);
+    // Without the trigger's hook the effect's stays: it passes everything on while storage is off.
+    uint8_t* t = InstallJumpHook(trigger, locate::kLogScriptStolenBytes, reinterpret_cast<void*>(&LogTriggerHook));
+    if (!t) return false;
+    g_origLogTrigger = reinterpret_cast<LogTriggerFn>(t);
+    return true;
+}
+
+// ---- Saves, loads and new games, for the save store ----
+
+locate::SaveLocations g_saves;
+using StartSaveFn = uint32_t(__fastcall*)(void* manager, const game::String* path, bool a, bool b, bool c);
+using GameStateLoadFn = void(__fastcall*)(void* state, void* file, const game::String* path);
+using NewGameFn = void(__fastcall*)(void* state);
+StartSaveFn g_origStartSave = nullptr;
+GameStateLoadFn g_origLoad = nullptr;
+NewGameFn g_origNewGame = nullptr;
+
+// The game's path, cut to fit; false on a fault. No C++ objects here, for __try.
+bool CopySavePath(const game::String* path, char* out, int32_t size) {
+    out[0] = '\0';
+    __try {
+        if (path) CopyGameString(path, out, size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '\0';
+        return false;
+    }
+}
+
+uint32_t __fastcall StartSaveHook(void* manager, const game::String* path, bool a, bool b, bool c) {
+    char text[1024];
+    bool read = CopySavePath(path, text, sizeof(text));
+    uint32_t result = g_origStartSave(manager, path, a, b, c);
+    if (result == 0 && read) StoreSaved(text);  // 0: the save has started
+    return result;
+}
+
+void __fastcall LoadHook(void* state, void* file, const game::String* path) {
+    char text[1024];
+    if (CopySavePath(path, text, sizeof(text))) StoreLoading(text);  // before the load, which may already run script
+    g_origLoad(state, file, path);
+}
+
+void __fastcall NewGameHook(void* state) {
+    StoreNewGame();  // before on_game_start runs
+    g_origNewGame(state);
+}
+
+bool InstallSaves(const locate::Image& img) {
+    std::string error;
+    if (!locate::LocateSaves(img, nullptr, g_saves, error)) {
+        Log("script storage: %s", error.c_str());
+        return false;
+    }
+    auto newGame = InstallJumpHook(g_saves.newGame, locate::kNewGameStartedStolenBytes, reinterpret_cast<void*>(&NewGameHook));
+    if (newGame) g_origNewGame = reinterpret_cast<NewGameFn>(newGame);
+    auto load = newGame ? InstallJumpHook(g_saves.load, locate::kGameStateLoadStolenBytes, reinterpret_cast<void*>(&LoadHook))
+                        : nullptr;
+    if (load) g_origLoad = reinterpret_cast<GameStateLoadFn>(load);
+    auto save = load ? InstallJumpHook(g_saves.startSave, locate::kStartSaveToPathStolenBytes,
+                                       reinterpret_cast<void*>(&StartSaveHook))
+                     : nullptr;
+    if (!save) {
+        Log("script storage: failed to hook saving and loading");
+        return false;
+    }
+    g_origStartSave = reinterpret_cast<StartSaveFn>(save);
+    Log("script storage: save hooks: StartSaveToPath +%llX, CGameState::Load +%llX, OnNewGameStarted +%llX",
+        static_cast<unsigned long long>(g_saves.startSave - reinterpret_cast<uint8_t*>(g_base)),
+        static_cast<unsigned long long>(g_saves.load - reinterpret_cast<uint8_t*>(g_base)),
+        static_cast<unsigned long long>(g_saves.newGame - reinterpret_cast<uint8_t*>(g_base)));
+    return true;
+}
+
+// ===========================================================================
+// Script storage (README, "Script storage")
+//
+// Paradox script keeps data outside the game without C#, through log = "@sef:..." effects and
+// triggers: numbers from variables, and text recorded from log lines, which `run` executes later.
+// Two stores, global (shared by every game, sefdata\global.txt) and save (sefdata\saves\<folder>\
+// <name>.txt, written when the game saves, read when that save loads, empty for a new game).
+// Off in multiplayer: each machine has its own files, so they would go out of sync.
+
+locate::VariableLocations g_vars;
+locate::LogScriptLocations g_storeLogs;
+locate::MultiplayerLocations g_mp;
+uint8_t* g_storeAssign = nullptr;  // CString::assign(string, text, length)
+uint8_t* g_storeEffectCommand = nullptr;  // OnExecute_Effect, for `run`; null: run is off
+std::wstring g_storeDir;  // sefdata\ in the game folder
+
+std::mutex g_storeLock;  // the stores, the recording and the run queue; effects may run on worker threads
+pdxstore::Store g_globalStore, g_saveStore;
+bool g_globalLoaded = false;
+std::string g_saveName;  // the save the save store belongs to, for the log
+ULONGLONG g_globalWritten = 0;
+
+struct StoreRecording {
+    bool active = false;
+    DWORD thread = 0;
+    pdxstore::Which store = pdxstore::Which::Global;
+    std::string key, text;
+    int lines = 0, dropped = 0;
+};
+StoreRecording g_recording;
+struct StoreRun {
+    pdxstore::Which store;
+    std::string key;
+};
+std::vector<StoreRun> g_storeRuns;
+
+std::atomic<uint64_t> g_storeSets{0}, g_storeGets{0}, g_storeTests{0}, g_storeRecorded{0}, g_storeRan{0}, g_storeErrors{0};
+
+using ProcessStringFn = game::String*(__fastcall*)(void* text, game::String* out, void* in, void* a, void* b, void* c);
+using AccessVariablesFn = uint8_t*(__fastcall*)(uint8_t* scope, const game::String* name);
+using FindVariableFn = void*(__fastcall*)(uint8_t* map, uint8_t** entry, const game::String* key);
+using SetVariableFn = void(__fastcall*)(uint8_t* variables, const game::String* name, int64_t value);
+ProcessStringFn g_origProcessString = nullptr;
+
+const char* StoreName(pdxstore::Which which) { return which == pdxstore::Which::Global ? "global" : "save"; }
+
+// Logs at most 100 problems a session, so a script that errs every day doesn't fill the log.
+void StoreProblem(const char* fmt, ...) {
+    if (g_storeErrors.fetch_add(1) >= 100) return;
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    Log("script storage: %s", buf);
+}
+
+bool StoreMultiplayer() {
+    __try {
+        const uint8_t* session = *g_mp.session;
+        return session && session[g_mp.flag] != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
+// The caller holds g_storeLock.
+pdxstore::Store& StoreFor(pdxstore::Which which) {
+    if (which == pdxstore::Which::Save) return g_saveStore;
+    if (!g_globalLoaded) {
+        g_globalLoaded = true;
+        std::string error;
+        if (!pdxstore::ReadStore(g_storeDir + L"\\global.txt", g_globalStore, error)) {
+            Log("script storage: sefdata\\global.txt: %s; the global store starts empty (the file is kept until it is "
+                "next written)", error.c_str());
+        } else {
+            Log("script storage: global store: %zu keys", g_globalStore.Count());
+        }
+    }
+    return g_globalStore;
+}
+
+// The caller holds g_storeLock.
+void WriteGlobalStore() {
+    if (!g_globalLoaded || !g_globalStore.Dirty()) return;
+    g_globalWritten = GetTickCount64();
+    if (!pdxstore::WriteStore(g_storeDir + L"\\global.txt", g_globalStore)) {
+        StoreProblem("cannot write sefdata\\global.txt (error %lu)", GetLastError());
+    }
+}
+
+// A CString the game owns, holding `text` (zeroed first, as the game's out-parameters are). No C++
+// objects here, for __try.
+bool MakeGameString(const char* text, size_t size, game::String* s) {
+    memset(s, 0, sizeof(*s));
+    s->cap = 0xF;
+    __try {
+        reinterpret_cast<game::AssignFn>(g_storeAssign)(s, text, size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void FreeGameString(game::String* s) {
+    __try {
+        if (s->cap > 0xF && s->kind != 1) reinterpret_cast<game::FreeFn>(g_str.gameFree)(s->ptr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    memset(s, 0, sizeof(*s));
+}
+
+// The scope's variable, as check_variable reads it: 1 set, 0 unset, -1 on a fault.
+int ReadVariable(uint8_t* scope, const game::String* name, int64_t* value) {
+    __try {
+        uint8_t* variables = reinterpret_cast<AccessVariablesFn>(g_vars.get)(scope, name);
+        if (!variables) return 0;
+        uint8_t* entry = nullptr;
+        reinterpret_cast<FindVariableFn>(g_vars.find)(variables + g_vars.map, &entry, name);
+        if (!entry || entry[g_vars.entryEmpty] == 0xFF) return 0;
+        *value = *reinterpret_cast<const int64_t*>(entry + g_vars.entryValue);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// Sets the scope's variable, as set_variable does: 1 done, 0 when the scope has no variables, -1 on a fault.
+int WriteVariable(uint8_t* scope, const game::String* name, int64_t value) {
+    __try {
+        uint8_t* variables = reinterpret_cast<AccessVariablesFn>(g_vars.access)(scope, name);
+        if (!variables) return 0;
+        reinterpret_cast<SetVariableFn>(g_vars.set)(variables, name, value);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// "@sef:" from a log effect: everything but `has`.
+void StoreEffect(const char* text, uint8_t* scope) {
+    pdxstore::Command c;
+    std::string error;
+    if (!pdxstore::ParseCommand(text, c, error)) {
+        StoreProblem("log = \"@sef:%s\": %s", text, error.c_str());
+        return;
+    }
+    if (StoreMultiplayer()) {
+        StoreProblem("log = \"@sef:%s\": off in multiplayer", text);
+        return;
+    }
+    if (c.op == pdxstore::Op::Has) {
+        StoreProblem("log = \"@sef:%s\": has is a trigger; use it in a limit or trigger block", text);
+        return;
+    }
+    std::unique_lock<std::mutex> lock(g_storeLock);
+    switch (c.op) {
+    case pdxstore::Op::Set: {
+        int64_t value = c.value;
+        int got = 1;
+        if (!c.number) {
+            lock.unlock();  // game code: no lock held while it runs
+            game::String name;
+            if (!MakeGameString(c.variable.data(), c.variable.size(), &name)) {
+                StoreProblem("@sef:%s: the game faulted making the name", text);
+                return;
+            }
+            got = ReadVariable(scope, &name, &value);
+            FreeGameString(&name);
+            lock.lock();
+            if (got < 0) {
+                StoreProblem("@sef:%s: the game faulted reading the variable", text);
+                return;
+            }
+        }
+        pdxstore::Store& store = StoreFor(c.store);
+        if (got == 0) {
+            store.Remove(c.key);  // an unset variable leaves the key unset
+        } else if (!store.Set(c.key, pdxstore::FormatFixed(value))) {
+            StoreProblem("@sef:%s: the %s store is full", text, StoreName(c.store));
+        }
+        g_storeSets.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    case pdxstore::Op::Get: {
+        const std::string* stored = StoreFor(c.store).Get(c.key);
+        if (!stored) return;  // nothing stored: the variable stays as it is
+        int64_t value = 0;
+        if (!pdxstore::ParseFixed(*stored, &value)) {
+            StoreProblem("@sef:%s: the %s value of %s is text, not a number", text, StoreName(c.store), c.key.c_str());
+            return;
+        }
+        lock.unlock();
+        game::String name;
+        if (!MakeGameString(c.variable.data(), c.variable.size(), &name)) {
+            StoreProblem("@sef:%s: the game faulted making the name", text);
+            return;
+        }
+        int done = WriteVariable(scope, &name, value);
+        FreeGameString(&name);
+        if (done < 0) StoreProblem("@sef:%s: the game faulted setting the variable", text);
+        if (done == 0) StoreProblem("@sef:%s: this scope has no variables", text);
+        g_storeGets.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    case pdxstore::Op::Clear:
+        StoreFor(c.store).Remove(c.key);
+        return;
+    case pdxstore::Op::Record:
+        if (g_recording.active) {
+            StoreProblem("@sef:%s: already recording %s; record_end first", text, g_recording.key.c_str());
+            return;
+        }
+        g_recording = StoreRecording();
+        g_recording.active = true;
+        g_recording.thread = GetCurrentThreadId();
+        g_recording.store = c.store;
+        g_recording.key = c.key;
+        return;
+    case pdxstore::Op::RecordEnd: {
+        if (!g_recording.active) {
+            StoreProblem("@sef:record_end with no recording");
+            return;
+        }
+        StoreRecording r = std::move(g_recording);
+        g_recording = StoreRecording();
+        if (!StoreFor(r.store).Set(r.key, r.text)) {
+            StoreProblem("record %s.%s: too long for the store", StoreName(r.store), r.key.c_str());
+            return;
+        }
+        g_storeRecorded.fetch_add(1, std::memory_order_relaxed);
+        Log("script storage: recorded %s.%s: %d lines kept, %d without script dropped", StoreName(r.store), r.key.c_str(),
+            r.lines, r.dropped);
+        return;
+    }
+    case pdxstore::Op::Run:
+        if (!g_storeEffectCommand) {
+            StoreProblem("@sef:%s: run is not available (the console's effect command was not found)", text);
+            return;
+        }
+        g_storeRuns.push_back({c.store, c.key});
+        return;
+    default:
+        return;
+    }
+}
+
+// "@sef:" from a log trigger: only `has`.
+bool StoreTrigger(const char* text, uint8_t* /*scope*/) {
+    pdxstore::Command c;
+    std::string error;
+    if (!pdxstore::ParseCommand(text, c, error)) {
+        StoreProblem("log = \"@sef:%s\": %s", text, error.c_str());
+        return false;
+    }
+    if (c.op != pdxstore::Op::Has) {
+        StoreProblem("log = \"@sef:%s\" in a trigger: only has works there", text);
+        return false;
+    }
+    if (StoreMultiplayer()) return false;  // the same answer on every machine
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    g_storeTests.fetch_add(1, std::memory_order_relaxed);
+    return StoreFor(c.store).Get(c.key) != nullptr;
+}
+
+// Copies the text ProcessString built. No C++ objects here, for __try.
+int32_t CopyLogText(const game::String* text, char* out, int32_t size) {
+    __try {
+        return CopyGameString(text, out, size);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// Replaces the log effect's call to CTextBase::ProcessString: the game's text, with \[...] filled in,
+// added to the recording while one is open on this thread.
+game::String* __fastcall LogTextHook(void* text, game::String* out, void* in, void* a, void* b, void* c) {
+    game::String* result = g_origProcessString(text, out, in, a, b, c);
+    if (!g_recording.active || g_recording.thread != GetCurrentThreadId()) return result;  // cheap check first
+    char buf[8192];
+    int32_t length = CopyLogText(out, buf, sizeof(buf));
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    if (!g_recording.active || length < 0) return result;
+    if (length >= static_cast<int32_t>(sizeof(buf))) {
+        StoreProblem("record %s: a line of %d bytes was cut to %zu", g_recording.key.c_str(), length, sizeof(buf) - 1);
+    }
+    std::string kept;
+    if (pdxstore::KeepRecordedLine(buf, &kept)) {
+        g_recording.text += kept;
+        g_recording.text += '\n';
+        ++g_recording.lines;
+    } else {
+        ++g_recording.dropped;
+    }
+    return result;
+}
+
+// Runs `text` with the console's effect command, as the console's `effect` does. No C++ objects here, for __try.
+bool RunStoredEffect(const char* text, game::ConsoleResult* result) {
+    game::String line = BorrowString(text);
+    uint8_t args[0x18]{};
+    game::String* items = &line;
+    memcpy(args + game::kArrayDataOffset, &items, sizeof(items));
+    *reinterpret_cast<int*>(args + game::kArrayCountOffset) = 1;
+    __try {
+        reinterpret_cast<game::EffectCommandFn>(g_storeEffectCommand)(result, args);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Once per frame, on the main thread between ticks: runs what `run` queued, ends a recording left
+// open, and writes the global store at most once a second.
+void StoreFrame() {
+    if (!g_storeOn) return;
+    std::vector<StoreRun> runs;
+    std::vector<std::string> texts;
+    {
+        std::lock_guard<std::mutex> lock(g_storeLock);
+        if (g_recording.active) {
+            StoreProblem("record %s.%s: no record_end in the same frame; dropped", StoreName(g_recording.store),
+                         g_recording.key.c_str());
+            g_recording = StoreRecording();
+        }
+        runs.swap(g_storeRuns);
+        for (const StoreRun& r : runs) {
+            const std::string* stored = StoreFor(r.store).Get(r.key);
+            texts.push_back(stored ? *stored : std::string());
+        }
+        if (g_globalStore.Dirty() && GetTickCount64() - g_globalWritten >= 1000) WriteGlobalStore();
+    }
+    if (runs.empty() || !*g_bench.gameState) return;
+    for (size_t i = 0; i < runs.size(); ++i) {
+        const char* name = StoreName(runs[i].store);
+        if (texts[i].empty()) {
+            StoreProblem("run %s.%s: nothing stored", name, runs[i].key.c_str());
+            continue;
+        }
+        if (StoreMultiplayer()) continue;
+        game::ConsoleResult result{};
+        bool ran = RunStoredEffect(texts[i].c_str(), &result);
+        g_storeRan.fetch_add(1, std::memory_order_relaxed);
+        if (ran) {
+            Log("script storage: ran %s.%s (%zu bytes)%s", name, runs[i].key.c_str(), texts[i].size(),
+                result.ok ? "" : "; the game refused it, see error.log");
+            FreeGameString(&result.text);
+        } else {
+            StoreProblem("run %s.%s: the game faulted running it", name, runs[i].key.c_str());
+        }
+    }
+}
+
+// From the save hooks (on the main thread, or the loading thread for loads).
+void StoreSaved(const char* path) {
+    if (!g_storeOn) return;
+    std::string key = pdxstore::SaveKey(path, true);
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    WriteGlobalStore();
+    if (key.empty()) return;  // not a save the player made: an out-of-sync dump
+    size_t count = g_saveStore.Count();
+    if (!pdxstore::WriteStore(pdxstore::SaveFile(g_storeDir, key), g_saveStore)) {
+        StoreProblem("cannot write the save store for %s (error %lu)", key.c_str(), GetLastError());
+        return;
+    }
+    g_saveName = key;
+    if (count) Log("script storage: save store written for %s: %zu keys", key.c_str(), count);
+}
+
+void StoreLoading(const char* path) {
+    if (!g_storeOn) return;
+    std::string key = pdxstore::SaveKey(path, false);
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    g_saveName = key;
+    if (key.empty()) {
+        g_saveStore.Clear();
+        return;
+    }
+    std::string error;
+    if (!pdxstore::ReadStore(pdxstore::SaveFile(g_storeDir, key), g_saveStore, error)) {
+        StoreProblem("the save store for %s: %s; it starts empty", key.c_str(), error.c_str());
+    } else if (g_saveStore.Count()) {
+        Log("script storage: save store read for %s: %zu keys", key.c_str(), g_saveStore.Count());
+    }
+}
+
+void StoreNewGame() {
+    if (!g_storeOn) return;
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    g_saveStore.Clear();
+    g_saveStore.SetClean();
+    g_saveName.clear();
+}
+
+// At exit, if the main thread isn't in the middle of a change.
+void StoreExit() {
+    if (!g_storeOn || !g_storeLock.try_lock()) return;
+    WriteGlobalStore();
+    g_storeLock.unlock();
+}
+
+std::string StoreSummary() {
+    if (!g_storeOn) return std::string();
+    uint64_t sets = g_storeSets.load(), gets = g_storeGets.load(), tests = g_storeTests.load(), rec = g_storeRecorded.load(),
+             ran = g_storeRan.load(), errors = g_storeErrors.load();
+    if (!sets && !gets && !tests && !rec && !ran && !errors) return std::string();
+    char buf[200];
+    sprintf_s(buf, "script storage: %llu sets, %llu gets, %llu has, %llu recorded, %llu run, %llu problems", sets, gets, tests,
+              rec, ran, errors);
+    return buf;
+}
+
+void InstallScriptStorage(HMODULE self, const locate::Image& img) {
+    std::string ini = IniPath(self);
+    if (!ini.empty() && GetPrivateProfileIntA("script_storage", "enabled", 1, ini.c_str()) == 0) {
+        Log("script storage: off (enabled=0)");
+        return;
+    }
+    std::string error;
+    locate::LexerLocations lexer;
+    if (!locate::LocateVariables(img, g_vars, error) || !locate::LocateLexer(img, lexer, error) ||
+        !locate::LocateMultiplayer(img, g_mp, error) ||
+        !locate::LocateLogScript(img, g_vars.effectName, g_vars.triggerName, g_storeLogs, error)) {
+        Log("script storage: %s; off", error.c_str());
+        return;
+    }
+    g_storeAssign = lexer.assign;
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
+    const wchar_t* slash = n && n < MAX_PATH ? wcsrchr(path, L'\\') : nullptr;
+    if (!slash) return;
+    g_storeDir = std::wstring(path, static_cast<size_t>(slash - path)) + L"\\sefdata";
+
+    // The text call: a near stub to LogTextHook, then the call's rel32 pointed at it.
+    uint8_t* call = g_storeLogs.textCall;
+    Code code;
+    code.JumpTo(reinterpret_cast<const void*>(&LogTextHook));
+    uint8_t* stub = PlaceStub(code, call);
+    int32_t rel = 0;
+    if (!stub || call[0] != 0xE8 || !Rel32(call + 5, stub, &rel)) {
+        Log("script storage: no room for the log text stub; off");
+        return;
+    }
+    g_origProcessString = reinterpret_cast<ProcessStringFn>(g_storeLogs.processString);
+    if (!HookLogs(g_storeLogs.logEffect, g_storeLogs.logEffectText, g_storeLogs.logTrigger, g_storeLogs.logTriggerText)) {
+        Log("script storage: failed to hook CLogEffect or CLogTrigger; off");
+        return;
+    }
+    if (!WriteCode(call + 1, &rel, sizeof(rel))) {
+        Log("script storage: failed to redirect the log text call; off");
+        return;
+    }
+    if (!InstallSaves(img)) Log("script storage: the save store keeps no data (see above)");
+    uint8_t* readExecute = nullptr;
+    if (!g_bench.gameState || !g_origCheckTick) {
+        Log("script storage: no tick hook; run is off");
+    } else if (!locate::LocateEffectCommand(img, g_bench.gameState, &g_storeEffectCommand, &readExecute, error)) {
+        g_storeEffectCommand = nullptr;
+        Log("script storage: %s; run is off", error.c_str());
+    }
+    g_storeOn = true;
+    Log("script storage: on; log = \"@sef:...\"; variables: access +%llX, get +%llX, set +%llX, map +0x%zx (value +0x%zx); "
+        "log text call +%llX; multiplayer flag +0x%zx; data in sefdata\\",
+        static_cast<unsigned long long>(g_vars.access - reinterpret_cast<uint8_t*>(g_base)),
+        static_cast<unsigned long long>(g_vars.get - reinterpret_cast<uint8_t*>(g_base)),
+        static_cast<unsigned long long>(g_vars.set - reinterpret_cast<uint8_t*>(g_base)), g_vars.map, g_vars.entryValue,
+        static_cast<unsigned long long>(call - reinterpret_cast<uint8_t*>(g_base)), g_mp.flag);
+}
+
+// ===========================================================================
 
 std::atomic<ULONGLONG> g_lastSummary{0};
 
@@ -2597,6 +3223,8 @@ void MaybeLogSummary() {
     if (!deferred.empty()) Log("%s", deferred.c_str());
     std::string files = FileLookupSummary();
     if (!files.empty()) Log("%s", files.c_str());
+    std::string store = StoreSummary();
+    if (!store.empty()) Log("%s", store.c_str());
     std::string ai = AiFixSummary();
     if (!ai.empty()) Log("%s", ai.c_str());
 }
@@ -2633,6 +3261,7 @@ void Install(HMODULE self) {
     InstallFleets(img);
     InstallMegastructures(img);
     InstallBench(self, img);
+    InstallScriptStorage(self, img);  // after InstallBench: run needs the tick hook
     InstallAiFixes(self, img);  // after InstallBench: the AI schedule reads the date it finds
     InstallIntel(self, img);
     InstallCombat(self, img);
@@ -2657,6 +3286,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         if (!IsStellaris()) return TRUE;  // other programs in the game folder: plain proxy
         OpenLog(module);
         Install(module);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        StoreExit();
     }
     return TRUE;
 }

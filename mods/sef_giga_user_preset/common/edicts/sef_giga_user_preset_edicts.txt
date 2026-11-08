@@ -1,0 +1,39 @@
+# Saves the current Gigastructures settings as "my preset", for every later game.
+#
+# Gigastructures' own giga_print_current_preset_options writes, line by line with log, the script that
+# rebuilds the current settings (remove_all_menu_flags = yes, the set_global_flag lines, and the
+# variables with their values filled in). stellaris-engine-fixes records those lines into its global
+# store (sefdata\global.txt in the game folder) under giga_user_preset; the menu's User preset button
+# runs them (events/giga_sef_user_preset_events.txt).
+sef_giga_save_user_preset_edict = {
+	icon = "GFX_giga_menu_icon"
+	length = 1
+	resources = {
+		category = edicts
+	}
+	potential = {
+		has_country_flag = giga_host
+		OR = {
+			has_country_flag = giga_menu_page_00
+			has_country_flag = giga_menu_page_01
+			has_country_flag = giga_menu_page_02
+			has_country_flag = giga_menu_page_03
+			has_country_flag = giga_menu_page_presets
+			has_country_flag = giga_menu_page_presets_02
+			has_country_flag = giga_menu_checking_settings
+			has_country_flag = giga_menu_checking_settings2
+			has_country_flag = giga_menu_checking_settings3
+		}
+	}
+	effect = {
+		custom_tooltip = sef_giga_save_user_preset_tt
+		hidden_effect = {
+			log = "@sef:global.record giga_user_preset"
+			giga_print_current_preset_options = yes
+			log = "@sef:record_end"
+		}
+	}
+	ai_weight = {
+		weight = 0
+	}
+}

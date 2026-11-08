@@ -238,6 +238,43 @@ int main(int argc, char** argv) {
     expect("saved random_seed jump", rva(ai.savedRandomJumps[1]), 0xb77b41);
     expect("g_bUseSavedRandom", rva(ai.useSavedRandom), 0x3114e38);
 
+    locate::VariableLocations vars;
+    locate::LogScriptLocations logs;
+    locate::MultiplayerLocations mp;
+    locate::SaveLocations saves;
+    uint8_t *effectCommand = nullptr, *readExecute = nullptr;
+    if (!locate::LocateVariables(img, vars, error) ||
+        !locate::LocateLogScript(img, vars.effectName, vars.triggerName, logs, error) ||
+        !locate::LocateMultiplayer(img, mp, error) || !locate::LocateSaves(img, nullptr, saves, error) ||
+        !locate::LocateEffectCommand(img, bench.gameState, &effectCommand, &readExecute, error)) {
+        printf("FAIL script storage: %s\n", error.c_str());
+        return 1;
+    }
+    printf("located script storage\n");
+    expect("AccessVariablePointer", rva(vars.access), 0x9f7df0);
+    expect("GetVariablePointer", rva(vars.get), 0x9f7ec0);
+    expect("variables find", rva(vars.find), 0x227390);
+    expect("CVariables::SetVariable", rva(vars.set), 0x7aae10);
+    expect("variables map", vars.map, 0x8);
+    expect("entry empty", vars.entryEmpty, 0x4);
+    expect("entry value", vars.entryValue, 0x38);
+    expect("variable effect name", vars.effectName, 0xc0);
+    expect("variable trigger name", vars.triggerName, 0x220);
+    expect("logEffect", rva(logs.logEffect), 0x1743450);
+    expect("logTrigger", rva(logs.logTrigger), 0x19a7cf0);
+    expect("logEffectText", logs.logEffectText, 0xc0);
+    expect("logTriggerText", logs.logTriggerText, 0x220);
+    expect("log text call", rva(logs.textCall), 0x17434f3);
+    expect("ProcessString", rva(logs.processString), 0x9d3140);
+    expect("multiplayer session", rva(mp.session), 0x3114e68);
+    expect("multiplayer flag", mp.flag, 0x180);
+    expect("StartSaveToPath", rva(saves.startSave), 0xa890d0);
+    expect("CGameState::Load", rva(saves.load), 0x264110);
+    expect("OnNewGameStarted", rva(saves.newGame), 0x2710d0);
+    expect("g_bIsReadingSaveFile", rva(saves.readingSave), 0x3114e21);
+    expect("OnExecute_Effect", rva(effectCommand), 0xec6390);
+    expect("ReadAndExecuteEffect", rva(readExecute), 0xec58f0);
+
     locate::LexerLocations lexer;
     if (!locate::LocateLexer(img, lexer, error)) {
         printf("FAIL token strings: %s\n", error.c_str());

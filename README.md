@@ -89,6 +89,44 @@ They act on the AI only and don't change saves. Single player; multiplayer is un
   unless the game runs with `-loadrandomseed`. The fix makes it continue the stream stored in the
   save.
 
+## Script storage for mods (`[script_storage]`)
+
+Paradox script can keep data outside the game, in the `sefdata` folder in the game folder, with
+`log = "@sef:..."` effects and triggers. Nothing happens unless a mod uses them; without the DLL
+they are ordinary `log` lines. Off in multiplayer, where each machine would read different files.
+
+Two stores: `global`, shared by every game (`sefdata\global.txt`), and `save`, which follows the
+save game (`sefdata\saves\<folder>\<name>.txt`: written when the game saves, read when that save
+loads, empty in a new game). Keys and variable names use letters, digits and `_ . : @ -`.
+
+| After `@sef:` | Where | What |
+|---|---|---|
+| `global.set KEY = VARIABLE` | effect | stores this scope's variable (an unset one unsets the key) |
+| `global.set KEY = 12.5`, `global.set VARIABLE` | effect | stores a number; `VARIABLE = VARIABLE` |
+| `global.get VARIABLE = KEY`, `global.get VARIABLE` | effect | sets this scope's variable from the store; nothing if the key is unset |
+| `global.clear KEY` | effect | unsets the key |
+| `global.has KEY` | trigger | whether the key is set |
+| `global.record KEY` ... `record_end` | effect | keeps every `log` line in between, as the game writes it (`\[...]` filled in); lines without `=`, `{` or `}` are dropped |
+| `global.run KEY` | effect | runs the recorded lines as an effect at the end of the frame, through the console's `effect` command (on the player's country, or what the interface has selected) |
+
+`save.` instead of `global.` uses the save store. Problems (a bad command, a full store) are
+written to `stellaris-engine-fixes.log`.
+
+```
+immediate = {
+    log = "@sef:global.get times_played"
+    change_variable = { which = times_played value = 1 }
+    log = "@sef:global.set times_played"
+}
+```
+
+`mods/sef_giga_user_preset` uses it for Gigastructural Engineering: an edict, **Save Settings as
+My Preset**, records the settings with Gigastructures' own preset printer, and the menu's **User
+Preset** button loads them in a later game. Copy the folder into `Documents\Paradox
+Interactive\Stellaris\mod`, add it in the launcher, and load it after Gigastructures.
+
+Status: the patterns are checked on Steam 4.5.2 and 4.5.3 and on GOG 4.5.2; not yet run in the game.
+
 ## Build
 
 Needs Visual Studio (2022 or later, any edition, or the Build Tools) with the C++ x64 tools;
@@ -116,6 +154,7 @@ build\natsort_test.exe
 build\pathcache_test.exe
 build\income_test.exe
 build\proxy_test.exe
+build\pdxstore_test.exe
 build\locate_test.exe <path to stellaris.exe> --expect-known
 build\alloctest\alloc_host.exe
 ```
@@ -130,7 +169,8 @@ test only requires every pattern to be found.
 | `src/dllmain.cpp` | The features and their hooks. |
 | `src/locate.h` | The byte patterns, and the code that reads addresses and offsets out of them. |
 | `src/allocator.h` | The heap replacement, installed from `DllMain` before the game's CRT starts. |
-| `src/pathcache.h`, `natsort.h`, `incometarget.h`, `game.h` | File lookup cache, name comparison, the income target arithmetic, game types. |
+| `src/pathcache.h`, `natsort.h`, `incometarget.h`, `pdxstore.h`, `game.h` | File lookup cache, name comparison, the income target arithmetic, the script storage's stores and files, game types. |
+| `mods/sef_giga_user_preset` | A Gigastructures submod that saves and loads a settings preset with the script storage. |
 | `src/exports_winmm.h` | The `winmm.dll` exports, forwarded to the system copy. |
 | `test/` | The tests above. |
 | `third_party/mimalloc` | mimalloc 3.6.1 (MIT, see its `LICENSE`). |

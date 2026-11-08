@@ -21,7 +21,7 @@ set CLFLAGS=/nologo /std:c++17 /O2 /MT /EHsc /W4 %MIINC%
 set LINKFLAGS=/NOLOGO /DEBUG /INCREMENTAL:NO
 cl %CLFLAGS% /LD src\dllmain.cpp build\mimalloc.obj /Fobuild\winmm\ /Fdbuild\winmm\ /Fe:build\winmm\winmm.dll /link %LINKFLAGS% /PDB:build\winmm\winmm.pdb advapi32.lib || exit /b 1
 copy /y stellaris-engine-fixes.ini build\winmm\stellaris-engine-fixes.ini >nul || exit /b 1
-for %%t in (proxy_test natsort_test locate_test pathcache_test income_test) do (
+for %%t in (proxy_test natsort_test locate_test pathcache_test income_test pdxstore_test) do (
   cl %CLFLAGS% test\%%t.cpp /Fobuild\ /Fe:build\%%t.exe /link /NOLOGO || exit /b 1
 )
 rem The allocator test: alloc_host.exe imports alloc_testdll.dll, which replaces its heap.

@@ -2729,7 +2729,7 @@ bool InstallSaves(const locate::Image& img) {
 // Paradox script keeps data outside the game without C#, through log = "@sef:..." effects and
 // triggers: numbers from variables, and text recorded from log lines, which `run` executes later.
 // Two stores, global (shared by every game, sefdata\global.txt) and save (sefdata\saves\<folder>\
-// <name>.txt, written when the game saves, read when that save loads, empty for a new game).
+// <name>.txt, written once a save has succeeded, read when that save loads, empty for a new game).
 // Off in multiplayer: each machine has its own files, so they would go out of sync.
 
 locate::VariableLocations g_vars;
@@ -3040,7 +3040,9 @@ game::String* __fastcall LogTextHook(void* text, game::String* out, void* in, vo
         StoreProblem("record %s: a line of %d bytes was cut to %zu", g_recording.key.c_str(), length, sizeof(buf) - 1);
     }
     std::string kept;
-    if (pdxstore::KeepRecordedLine(buf, &kept)) {
+    if (g_recording.text.size() > pdxstore::kMaxValue) {
+        ++g_recording.dropped;  // already too long to store: record_end reports it
+    } else if (pdxstore::KeepRecordedLine(buf, &kept)) {
         g_recording.text += kept;
         g_recording.text += '\n';
         ++g_recording.lines;
@@ -3085,7 +3087,11 @@ void StoreFrame() {
         }
         if (g_globalStore.Dirty() && GetTickCount64() - g_globalWritten >= 1000) WriteGlobalStore();
     }
-    if (runs.empty() || !*g_bench.gameState) return;
+    if (runs.empty()) return;
+    if (!*g_bench.gameState) {
+        StoreProblem("run: %zu queued with no game running; dropped", runs.size());
+        return;
+    }
     for (size_t i = 0; i < runs.size(); ++i) {
         const char* name = StoreName(runs[i].store);
         if (texts[i].empty()) {

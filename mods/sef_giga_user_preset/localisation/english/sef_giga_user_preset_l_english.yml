@@ -1,6 +1,6 @@
 ﻿l_english:
- sef_giga_save_user_preset_edict:0 "Save Settings as My Preset"
- sef_giga_save_user_preset_edict_desc:0 "Saves the current Gigastructures settings outside the game, for every later game. In a new game, open the menu's §YPresets§! page and press §YEnable Preset§! on §YUser Preset§! to load them. Needs §Ystellaris-engine-fixes§!."
+ edict_sef_giga_save_user_preset_edict:0 "Save Settings as My Preset"
+ edict_sef_giga_save_user_preset_edict_desc:0 "Saves the current Gigastructures settings outside the game, for every later game. In a new game, open the menu's §YPresets§! page and press §YEnable Preset§! on §YUser Preset§! to load them. Needs §Ystellaris-engine-fixes§!."
  sef_giga_save_user_preset_tt:0 "Saves the current settings as §YMy Preset§!."
  sef_giga_user_preset.2.name:0 "No Saved Preset"
  sef_giga_user_preset.2.desc:0 "There is no saved preset yet. Choose your settings, then use the §YSave Settings as My Preset§! edict. Saving and loading need §Ystellaris-engine-fixes§! (winmm.dll in the game folder)."

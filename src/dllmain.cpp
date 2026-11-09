@@ -172,7 +172,7 @@ bool g_storeOn = false;
 void StoreEffect(const char* text, uint8_t* scope);
 bool StoreTrigger(const char* text, uint8_t* scope);
 void StoreFrame();
-void StoreSaved(const char* path);
+void StoreSaveStarted(void* manager);
 void StoreLoading(const char* path);
 void StoreNewGame();
 
@@ -2681,10 +2681,8 @@ bool CopySavePath(const game::String* path, char* out, int32_t size) {
 }
 
 uint32_t __fastcall StartSaveHook(void* manager, const game::String* path, bool a, bool b, bool c) {
-    char text[1024];
-    bool read = CopySavePath(path, text, sizeof(text));
     uint32_t result = g_origStartSave(manager, path, a, b, c);
-    if (result == 0 && read) StoreSaved(text);  // 0: the save has started
+    if (result == 0) StoreSaveStarted(manager);  // 0: the save was accepted; the store reads its normalized path
     return result;
 }
 
@@ -2744,8 +2742,34 @@ std::wstring g_storeDir;  // sefdata\ in the game folder
 std::mutex g_storeLock;  // the stores, the recording and the run queue; effects may run on worker threads
 pdxstore::Store g_globalStore, g_saveStore;
 bool g_globalLoaded = false;
-std::string g_saveName;  // the save the save store belongs to, for the log
 ULONGLONG g_globalWritten = 0;
+
+struct PendingStoreSave {
+    std::string key;
+    pdxstore::Store snapshot;
+};
+std::map<void*, PendingStoreSave> g_pendingStoreSaves;
+locate::SaveWriteLocations g_saveWrite;
+void(__fastcall* g_origZipAndWrite)(void*, const game::String*) = nullptr;
+void(__fastcall* g_origDestroySaveArchive)(void*) = nullptr;
+int(__fastcall* g_origCloseSaveFile)(void*) = nullptr;
+bool(__fastcall* g_origCloudSaveWrite)(void*, const void*, uint32_t) = nullptr;
+bool(__fastcall* g_origSaveAddFile)(void*, void*, const game::String*, int, int) = nullptr;
+
+struct SaveWriteStatus;
+thread_local SaveWriteStatus* g_saveWriteStatus = nullptr;
+
+struct SaveWriteStatus {
+    explicit SaveWriteStatus(bool tracked) : previous(g_saveWriteStatus) {
+        g_saveWriteStatus = tracked ? this : nullptr;
+    }
+    ~SaveWriteStatus() { g_saveWriteStatus = previous; }
+
+    SaveWriteStatus* const previous;
+    bool archiveOk = true;
+    bool closingArchive = false;
+    bool written = false;
+};
 
 struct StoreRecording {
     bool active = false;
@@ -2949,6 +2973,10 @@ void StoreEffect(const char* text, uint8_t* scope) {
             StoreProblem("@sef:record_end with no recording");
             return;
         }
+        if (g_recording.thread != GetCurrentThreadId()) {
+            StoreProblem("@sef:record_end from a different thread than record");
+            return;
+        }
         StoreRecording r = std::move(g_recording);
         g_recording = StoreRecording();
         if (!StoreFor(r.store).Set(r.key, r.text)) {
@@ -3003,11 +3031,11 @@ int32_t CopyLogText(const game::String* text, char* out, int32_t size) {
 // added to the recording while one is open on this thread.
 game::String* __fastcall LogTextHook(void* text, game::String* out, void* in, void* a, void* b, void* c) {
     game::String* result = g_origProcessString(text, out, in, a, b, c);
-    if (!g_recording.active || g_recording.thread != GetCurrentThreadId()) return result;  // cheap check first
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    if (!g_recording.active || g_recording.thread != GetCurrentThreadId()) return result;
     char buf[8192];
     int32_t length = CopyLogText(out, buf, sizeof(buf));
-    std::lock_guard<std::mutex> lock(g_storeLock);
-    if (!g_recording.active || length < 0) return result;
+    if (length < 0) return result;
     if (length >= static_cast<int32_t>(sizeof(buf))) {
         StoreProblem("record %s: a line of %d bytes was cut to %zu", g_recording.key.c_str(), length, sizeof(buf) - 1);
     }
@@ -3078,27 +3106,81 @@ void StoreFrame() {
     }
 }
 
-// From the save hooks (on the main thread, or the loading thread for loads).
-void StoreSaved(const char* path) {
+// StartSaveToPath finishes any prior write before accepting a new one on this manager.
+// Capture the accepted, normalized path before Update (or Ironman exit) starts the write.
+void StoreSaveStarted(void* manager) {
     if (!g_storeOn) return;
-    std::string key = pdxstore::SaveKey(path, true);
+    char path[1024];
+    auto* params = static_cast<const uint8_t*>(manager) + g_saveWrite.paramsOffset;
+    bool tracked = g_origZipAndWrite && !StoreMultiplayer() &&
+                   CopySavePath(reinterpret_cast<const game::String*>(params), path, sizeof(path));
+    std::string key = tracked ? pdxstore::SaveKey(path, true) : std::string();
     std::lock_guard<std::mutex> lock(g_storeLock);
     WriteGlobalStore();
-    if (key.empty()) return;  // not a save the player made: an out-of-sync dump
-    size_t count = g_saveStore.Count();
-    if (!pdxstore::WriteStore(pdxstore::SaveFile(g_storeDir, key), g_saveStore)) {
-        StoreProblem("cannot write the save store for %s (error %lu)", key.c_str(), GetLastError());
+    if (key.empty()) {
+        g_pendingStoreSaves.erase(manager);
         return;
     }
-    g_saveName = key;
-    if (count) Log("script storage: save store written for %s: %zu keys", key.c_str(), count);
+    g_pendingStoreSaves.insert_or_assign(manager, PendingStoreSave{std::move(key), g_saveStore});
+}
+
+PendingStoreSave TakeStoreSave(void* manager, const game::String* path) {
+    char text[1024];
+    const std::string key = CopySavePath(path, text, sizeof(text)) ? pdxstore::SaveKey(text, true) : std::string();
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    auto save = g_pendingStoreSaves.find(manager);
+    if (save == g_pendingStoreSaves.end() || save->second.key != key) return {};
+    PendingStoreSave pending = std::move(save->second);
+    g_pendingStoreSaves.erase(save);
+    return pending;
+}
+
+// Both the scheduled save task and the synchronous Ironman exit go through this writer.
+void __fastcall StoreZipAndWriteHook(void* manager, const game::String* params) {
+    PendingStoreSave save = TakeStoreSave(manager, params);
+    SaveWriteStatus status(!save.key.empty());
+    g_origZipAndWrite(manager, params);
+    if (save.key.empty() || !status.written || !status.archiveOk) return;
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    size_t count = save.snapshot.Count();
+    if (!pdxstore::WriteStore(pdxstore::SaveFile(g_storeDir, save.key), save.snapshot)) {
+        StoreProblem("cannot write the save store for %s (error %lu)", save.key.c_str(), GetLastError());
+    } else if (count) {
+        Log("script storage: save store written for %s: %zu keys", save.key.c_str(), count);
+    }
+}
+
+bool __fastcall StoreSaveAddFileHook(void* archive, void* file, const game::String* name, int method, int level) {
+    bool added = g_origSaveAddFile(archive, file, name, method, level);
+    if (!added && g_saveWriteStatus) g_saveWriteStatus->archiveOk = false;
+    return added;
+}
+
+bool __fastcall StoreCloudSaveWriteHook(void* file, const void* data, uint32_t size) {
+    bool written = g_origCloudSaveWrite(file, data, size);
+    if (g_saveWriteStatus) g_saveWriteStatus->written = written;
+    return written;
+}
+
+// The two normal local-write paths reach the destructor after WriteData succeeds.
+// Only observe PHYSFS_close during those calls. Unwind cleanup calls the original destructor.
+void __fastcall StoreDestroySaveArchiveHook(void* archive) {
+    SaveWriteStatus* status = g_saveWriteStatus;
+    if (status) status->closingArchive = true;
+    g_origDestroySaveArchive(archive);
+    if (status) status->closingArchive = false;
+}
+
+int __fastcall StoreCloseSaveFileHook(void* file) {
+    int closed = g_origCloseSaveFile(file);
+    if (g_saveWriteStatus && g_saveWriteStatus->closingArchive) g_saveWriteStatus->written = closed != 0;
+    return closed;
 }
 
 void StoreLoading(const char* path) {
     if (!g_storeOn) return;
     std::string key = pdxstore::SaveKey(path, false);
     std::lock_guard<std::mutex> lock(g_storeLock);
-    g_saveName = key;
     if (key.empty()) {
         g_saveStore.Clear();
         return;
@@ -3116,7 +3198,6 @@ void StoreNewGame() {
     std::lock_guard<std::mutex> lock(g_storeLock);
     g_saveStore.Clear();
     g_saveStore.SetClean();
-    g_saveName.clear();
 }
 
 // At exit, if the main thread isn't in the middle of a change.
@@ -3135,6 +3216,39 @@ std::string StoreSummary() {
     sprintf_s(buf, "script storage: %llu sets, %llu gets, %llu has, %llu recorded, %llu run, %llu problems", sets, gets, tests,
               rec, ran, errors);
     return buf;
+}
+
+bool RedirectStoreCall(uint8_t* call, const void* hook) {
+    Code code;
+    code.JumpTo(hook);
+    uint8_t* stub = PlaceStub(code, call);
+    int32_t rel = 0;
+    return stub && call[0] == 0xE8 && Rel32(call + 5, stub, &rel) && WriteCode(call + 1, &rel, sizeof(rel));
+}
+
+bool InstallStoreSaveWrite(const locate::Image& img) {
+    std::string error;
+    if (!locate::LocateSaveWrite(img, g_saves, g_saveWrite, error)) {
+        Log("script storage: %s", error.c_str());
+        return false;
+    }
+    g_origDestroySaveArchive = reinterpret_cast<decltype(g_origDestroySaveArchive)>(g_saveWrite.destroyArchive);
+    g_origCloseSaveFile = reinterpret_cast<decltype(g_origCloseSaveFile)>(g_saveWrite.closeFile);
+    g_origCloudSaveWrite = reinterpret_cast<decltype(g_origCloudSaveWrite)>(g_saveWrite.cloudWrite);
+    g_origSaveAddFile = reinterpret_cast<decltype(g_origSaveAddFile)>(g_saveWrite.addFile);
+    if (!RedirectStoreCall(g_saveWrite.closeCall, reinterpret_cast<const void*>(&StoreCloseSaveFileHook)) ||
+        !RedirectStoreCall(g_saveWrite.cloudCall, reinterpret_cast<const void*>(&StoreCloudSaveWriteHook))) return false;
+    for (uint8_t* call : g_saveWrite.archiveDestroyCalls) {
+        if (!RedirectStoreCall(call, reinterpret_cast<const void*>(&StoreDestroySaveArchiveHook))) return false;
+    }
+    for (uint8_t* call : g_saveWrite.addFileCalls) {
+        if (!RedirectStoreCall(call, reinterpret_cast<const void*>(&StoreSaveAddFileHook))) return false;
+    }
+    // Until this last hook installs, the call redirects only forward to the game.
+    auto* zip = InstallJumpHook(g_saveWrite.zipAndWrite, locate::kZipAndWriteStolenBytes,
+                                reinterpret_cast<void*>(&StoreZipAndWriteHook));
+    g_origZipAndWrite = reinterpret_cast<decltype(g_origZipAndWrite)>(zip);
+    return zip != nullptr;
 }
 
 void InstallScriptStorage(HMODULE self, const locate::Image& img) {
@@ -3177,7 +3291,9 @@ void InstallScriptStorage(HMODULE self, const locate::Image& img) {
         Log("script storage: failed to redirect the log text call; off");
         return;
     }
-    if (!InstallSaves(img)) Log("script storage: the save store keeps no data (see above)");
+    if (!InstallSaves(img) || !InstallStoreSaveWrite(img)) {
+        Log("script storage: save persistence is off; save hooks could not be installed");
+    }
     uint8_t* readExecute = nullptr;
     if (!g_bench.gameState || !g_origCheckTick) {
         Log("script storage: no tick hook; run is off");

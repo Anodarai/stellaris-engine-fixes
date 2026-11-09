@@ -96,8 +96,8 @@ Paradox script can keep data outside the game, in the `sefdata` folder in the ga
 they are ordinary `log` lines. Off in multiplayer, where each machine would read different files.
 
 Two stores: `global`, shared by every game (`sefdata\global.txt`), and `save`, which follows the
-save game (`sefdata\saves\<folder>\<name>.txt`: written when the game saves, read when that save
-loads, empty in a new game). Keys and variable names use letters, digits and `_ . : @ -`.
+save game (`sefdata\saves\<folder>\<name>.txt`: written once a save, including Ironman's save on
+exit, has been written successfully, read when that save loads, empty in a new game). Keys and variable names use letters, digits and `_ . : @ -`.
 
 | After `@sef:` | Where | What |
 |---|---|---|

@@ -274,6 +274,18 @@ int main(int argc, char** argv) {
     expect("g_bIsReadingSaveFile", rva(saves.readingSave), 0x3114e21);
     expect("OnExecute_Effect", rva(effectCommand), 0xec6390);
     expect("ReadAndExecuteEffect", rva(readExecute), 0xec58f0);
+    locate::SaveWriteLocations saveWrite;
+    if (!locate::LocateSaveWrite(img, saves, saveWrite, error)) {
+        printf("FAIL save write: %s\n", error.c_str());
+        return 1;
+    }
+    printf("located save completion\n");
+    expect("ZipAndWrite", rva(saveWrite.zipAndWrite), 0xa8a1f0);
+    expect("save parameters", saveWrite.paramsOffset, 0x70);
+    expect("archive destructor", rva(saveWrite.destroyArchive), 0x1b3af20);
+    expect("PHYSFS_close", rva(saveWrite.closeFile), 0x1b685e0);
+    expect("cloud write", rva(saveWrite.cloudWrite), 0x1c9f270);
+    expect("zip AddFile", rva(saveWrite.addFile), 0x1d03420);
 
     locate::LexerLocations lexer;
     if (!locate::LocateLexer(img, lexer, error)) {

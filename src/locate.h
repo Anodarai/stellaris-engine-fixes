@@ -1432,6 +1432,92 @@ inline bool LocateSaves(const Image& img, const uint8_t* allowGetPlayer, SaveLoc
     return true;
 }
 
+struct SaveWriteLocations {
+    uint8_t* zipAndWrite = nullptr;
+    size_t paramsOffset = 0;  // SSaveParameters in CSaveGameTaskManager, beginning with the normalized path
+    uint8_t* destroyArchive = nullptr;
+    uint8_t* archiveDestroyCalls[2]{};
+    uint8_t* closeFile = nullptr;
+    uint8_t* closeCall = nullptr;
+    uint8_t* cloudWrite = nullptr;
+    uint8_t* cloudCall = nullptr;
+    uint8_t* addFile = nullptr;
+    uint8_t* addFileCalls[2]{};
+};
+
+// SaveGameOnCurrentThread calls CreateMemoryFiles, copies the manager's SSaveParameters, then calls ZipAndWrite.
+constexpr char kSaveOnCurrentThread[] =
+    "40 53 48 81 EC ?? ?? ?? ?? 48 8B D9 E8 ?? ?? ?? ?? 48 8D 53 ?? 48 8D 4C 24 20 E8 ?? ?? ?? ?? "
+    "48 8B D0 48 8B CB E8 ?? ?? ?? ?? 48 81 C4 ?? ?? ?? ?? 5B C3";
+// StartSaveToPath stores the normalized path, then marks the request pending and returns success.
+constexpr char kAcceptedSavePath[] =
+    "49 8D 4D ?? 4C 8B C3 E8 ?? ?? ?? ?? 45 88 A5 ?? ?? ?? ?? 4D 89 BD ?? ?? ?? ?? "
+    "0F B6 85 ?? ?? ?? ?? 41 88 85 ?? ?? ?? ?? 41 C6 45 ?? 01 33 F6";
+constexpr char kZipAndWrite[] =
+    "48 89 54 24 10 53 56 57 41 54 41 55 41 56 41 57 48 81 EC ?? ?? ?? ?? 4C 8B F2 48 8B F1 45 33 ED "
+    "44 89 AC 24 ?? ?? ?? ?? 45 8D 4D 01 44 38 6A ?? 0F 84";
+constexpr size_t kZipAndWriteStolenBytes = 16;
+constexpr char kZipAddFile[] =
+    "48 8B 56 ?? 4C 8D 42 20 48 8D 4C 24 30 E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 41 B9 03 00 01 00";
+constexpr char kZipCloudWrite[] = "48 8B 56 48 49 8B CC E8 ?? ?? ?? ?? 84 C0 74 ?? 48 85 DB";
+// Both local output paths destroy the archive in normal control flow. The raw path then destroys the save parameters.
+constexpr char kZipDestroyRaw[] =
+    "48 8D 8C 24 ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 49 8B CE E8 ?? ?? ?? ?? E9";
+constexpr char kZipDestroyPacked[] =
+    "48 8B 56 48 48 8D 8C 24 ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8D 8C 24 ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 41 8B FD";
+// CArchiveFile::~CArchiveFile calls PHYSFS_close and tests its result, but returns void.
+constexpr char kArchiveClose[] =
+    "48 8B B9 ?? ?? ?? ?? 48 85 FF 74 ?? 48 8B 0F E8 ?? ?? ?? ?? 85 C0 75";
+
+inline bool LocateSaveWrite(const Image& img, const SaveLocations& saves, SaveWriteLocations& out, std::string& error) {
+    uint8_t* sync = FindOne(img, "CSaveGameTaskManager::SaveGameOnCurrentThread", kSaveOnCurrentThread, error);
+    if (!sync) return false;
+    out.zipAndWrite = FindOne(img, "CSaveGameTaskManager::ZipAndWrite", kZipAndWrite, error);
+    if (!out.zipAndWrite) return false;
+    if (RelTarget(sync + 38, sync + 42) != out.zipAndWrite) {
+        error = "SaveGameOnCurrentThread calls a different ZipAndWrite";
+        return false;
+    }
+    out.paramsOffset = sync[20];
+    auto accepted = FindAll(saves.startSave, saves.startSave + 0x510, Parse(kAcceptedSavePath), 2);
+    if (accepted.size() != 1 || accepted[0][3] != out.paramsOffset) {
+        error = "StartSaveToPath writes the path at a different offset from SaveGameOnCurrentThread";
+        return false;
+    }
+    auto inZip = [&](const char* pattern) {
+        return FindAll(out.zipAndWrite, out.zipAndWrite + 0x800, Parse(pattern), 3);
+    };
+    auto add = inZip(kZipAddFile);
+    auto cloud = inZip(kZipCloudWrite);
+    auto raw = inZip(kZipDestroyRaw);
+    auto packed = inZip(kZipDestroyPacked);
+    if (add.size() != 2 || cloud.size() != 1 || raw.size() != 1 || packed.size() != 1) {
+        error = "ZipAndWrite: expected two AddFile calls, a cloud write and two local archive closes";
+        return false;
+    }
+    out.addFileCalls[0] = add[0] + 13;
+    out.addFileCalls[1] = add[1] + 13;
+    out.addFile = RelTarget(out.addFileCalls[0] + 1, out.addFileCalls[0] + 5);
+    out.cloudCall = cloud[0] + 7;
+    out.cloudWrite = RelTarget(out.cloudCall + 1, out.cloudCall + 5);
+    out.archiveDestroyCalls[0] = raw[0] + 8;
+    out.archiveDestroyCalls[1] = packed[0] + 26;
+    out.destroyArchive = RelTarget(out.archiveDestroyCalls[0] + 1, out.archiveDestroyCalls[0] + 5);
+    if (RelTarget(out.archiveDestroyCalls[1] + 1, out.archiveDestroyCalls[1] + 5) != out.destroyArchive ||
+        RelTarget(out.addFileCalls[1] + 1, out.addFileCalls[1] + 5) != out.addFile) {
+        error = "ZipAndWrite: the archive calls disagree";
+        return false;
+    }
+    auto close = FindAll(out.destroyArchive, out.destroyArchive + 0x60, Parse(kArchiveClose), 2);
+    if (close.size() != 1) {
+        error = "CArchiveFile::~CArchiveFile: expected a checked PHYSFS_close";
+        return false;
+    }
+    out.closeCall = close[0] + 15;
+    out.closeFile = RelTarget(out.closeCall + 1, out.closeCall + 5);
+    return true;
+}
+
 // Script variables, as set_variable, is_variable_set and check_variable reach them.
 struct VariableLocations {
     uint8_t* access = nullptr;  // AccessVariablePointer(CEventScope&, const CString& name) -> CVariables*, as set_variable

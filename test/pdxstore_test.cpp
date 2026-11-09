@@ -37,7 +37,9 @@ static void Numbers() {
     CHECK(FormatFixed(1) == "0.00001");
     CHECK(FormatFixed(0) == "0");
     CHECK(FormatFixed(INT64_MIN) == "-92233720368547.75808");
-    for (int64_t x : {int64_t(0), int64_t(1), int64_t(-1), int64_t(123456789), int64_t(-100000), INT64_MAX}) {
+    CHECK(!ParseFixed("92233720368547.75808", &v));
+    CHECK(!ParseFixed("-92233720368547.75809", &v));
+    for (int64_t x : {int64_t(0), int64_t(1), int64_t(-1), int64_t(123456789), int64_t(-100000), INT64_MIN, INT64_MAX}) {
         CHECK(ParseFixed(FormatFixed(x), &v) && v == x);
     }
 }
@@ -148,6 +150,20 @@ static void Files() {
     CHECK(WriteFileText(file, bad));
     t.Set("x", "y");
     CHECK(!ReadStore(file, t, e) && t.Empty());
+    // Escaped values plus the syntax for many short keys exceeded the old read limit.
+    for (int i = 0; i < 2048; ++i) {
+        char key[5];
+        snprintf(key, sizeof(key), "k%03x", static_cast<unsigned int>(i));
+        CHECK(s.Set(key, ""));
+    }
+    for (int i = 0; i < 16; ++i) {
+        size_t size = i == 15 ? kMaxValue - 2048 * 4 - 16 * 4 : kMaxValue;
+        char key[5];
+        snprintf(key, sizeof(key), "v%03x", static_cast<unsigned int>(i));
+        CHECK(s.Set(key, std::string(size, '\n')));
+    }
+    CHECK(WriteStore(file, s));
+    CHECK(ReadStore(file, t, e) && t.Values() == s.Values());
     DeleteFileW(file.c_str());
     RemoveDirectoryW((dir + L"\\saves\\folder").c_str());
     RemoveDirectoryW((dir + L"\\saves").c_str());

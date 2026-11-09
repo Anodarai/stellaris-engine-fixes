@@ -27,11 +27,12 @@ inline bool ParseFixed(const std::string& s, int64_t* out) {
     size_t i = 0;
     bool negative = false;
     if (i < s.size() && (s[i] == '-' || s[i] == '+')) negative = s[i++] == '-';
+    const uint64_t limit = static_cast<uint64_t>(INT64_MAX) + (negative ? 1 : 0);
     uint64_t whole = 0, frac = 0;
     int digits = 0, fracDigits = 0;
     for (; i < s.size() && s[i] >= '0' && s[i] <= '9'; ++i, ++digits) {
         whole = whole * 10 + static_cast<uint64_t>(s[i] - '0');
-        if (whole > static_cast<uint64_t>(INT64_MAX / kFixedOne)) return false;
+        if (whole > limit / kFixedOne) return false;
     }
     if (i < s.size() && s[i] == '.') {
         for (++i; i < s.size() && s[i] >= '0' && s[i] <= '9'; ++i, ++digits) {
@@ -43,9 +44,14 @@ inline bool ParseFixed(const std::string& s, int64_t* out) {
     }
     if (digits == 0 || i != s.size()) return false;
     for (; fracDigits < 5; ++fracDigits) frac *= 10;
-    if (whole == static_cast<uint64_t>(INT64_MAX / kFixedOne) && frac > static_cast<uint64_t>(INT64_MAX % kFixedOne)) return false;
-    int64_t v = static_cast<int64_t>(whole) * kFixedOne + static_cast<int64_t>(frac);
-    *out = negative ? -v : v;
+    uint64_t magnitude = whole * kFixedOne + frac;
+    if (magnitude > limit) return false;
+    if (magnitude > static_cast<uint64_t>(INT64_MAX)) {
+        *out = INT64_MIN;
+    } else {
+        int64_t v = static_cast<int64_t>(magnitude);
+        *out = negative ? -v : v;
+    }
     return true;
 }
 
@@ -375,7 +381,10 @@ inline bool ReadFileText(const std::wstring& file, std::string& out, bool* missi
         return *missing;
     }
     LARGE_INTEGER size;
-    bool ok = GetFileSizeEx(h, &size) && size.QuadPart <= static_cast<LONGLONG>(2 * kMaxStore + 4096);
+    // A value byte can double when escaped. Each record adds six bytes of syntax
+    // to a key of at least one byte, so no serialized record grows by more than 7x.
+    constexpr LONGLONG kMaxFileBytes = 7 * kMaxStore + 4096;
+    bool ok = GetFileSizeEx(h, &size) && size.QuadPart <= kMaxFileBytes;
     if (ok) {
         out.resize(static_cast<size_t>(size.QuadPart));
         DWORD got = 0;

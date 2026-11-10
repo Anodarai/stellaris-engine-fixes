@@ -125,7 +125,7 @@ My Preset**, records the settings with Gigastructures' own preset printer, and t
 Preset** button loads them in a later game. Copy the folder into `Documents\Paradox
 Interactive\Stellaris\mod`, add it in the launcher, and load it after Gigastructures.
 
-Status: the patterns are checked on Steam 4.5.2 and 4.5.3 and on GOG 4.5.2; not yet run in the game.
+Status: the patterns are checked on Steam 4.5.2 and 4.5.3 and on GOG 4.5.2.
 
 ## Build
 

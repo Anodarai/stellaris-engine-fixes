@@ -231,6 +231,7 @@ public:
     size_t Count() const { return values_.size(); }
     bool Dirty() const { return dirty_; }
     void SetClean() { dirty_ = false; }
+    void MarkDirty() { dirty_ = true; }
     const std::map<std::string, std::string>& Values() const { return values_; }
 
 private:

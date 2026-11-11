@@ -11,7 +11,7 @@ if not defined VS_DIR (
 )
 call "%VS_DIR%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul || exit /b 1
 cd /d "%~dp0"
-for %%p in (winmm alloctest) do (
+for %%p in (winmm alloctest numeric-install-test mpstore-runtime-test) do (
   if not exist build\%%p mkdir build\%%p
 )
 set MIINC=/I third_party\mimalloc\include
@@ -21,10 +21,15 @@ set CLFLAGS=/nologo /std:c++17 /O2 /MT /EHsc /W4 %MIINC%
 set LINKFLAGS=/NOLOGO /DEBUG /INCREMENTAL:NO
 cl %CLFLAGS% /LD src\dllmain.cpp build\mimalloc.obj /Fobuild\winmm\ /Fdbuild\winmm\ /Fe:build\winmm\winmm.dll /link %LINKFLAGS% /PDB:build\winmm\winmm.pdb advapi32.lib || exit /b 1
 copy /y stellaris-engine-fixes.ini build\winmm\stellaris-engine-fixes.ini >nul || exit /b 1
-for %%t in (proxy_test natsort_test locate_test pathcache_test income_test pdxstore_test) do (
-  cl %CLFLAGS% test\%%t.cpp /Fobuild\ /Fe:build\%%t.exe /link /NOLOGO || exit /b 1
+rem Build standalone tests. The two harnesses that link mimalloc are built below.
+for %%t in (test\*_test.cpp) do (
+  if /i not "%%~nt"=="static_import_test" if /i not "%%~nt"=="numeric_install_test" if /i not "%%~nt"=="mpstore_runtime_test" (
+    cl %CLFLAGS% "%%t" /Fobuild\ /Fe:build\%%~nt.exe /link /NOLOGO || exit /b 1
+  )
 )
 rem The allocator test: alloc_host.exe imports alloc_testdll.dll, which replaces its heap.
+cl %CLFLAGS% test\numeric_install_test.cpp build\mimalloc.obj /Fobuild\numeric-install-test\ /Fe:build\numeric-install-test\numeric_install_test.exe /link /NOLOGO advapi32.lib || exit /b 1
+cl %CLFLAGS% test\mpstore_runtime_test.cpp build\mimalloc.obj /Fobuild\mpstore-runtime-test\ /Fe:build\mpstore-runtime-test\mpstore_runtime_test.exe /link /NOLOGO advapi32.lib || exit /b 1
 cl %CLFLAGS% /LD test\alloc_testdll.cpp build\mimalloc.obj /Fobuild\alloctest\ /Fe:build\alloctest\alloc_testdll.dll /link %LINKFLAGS% advapi32.lib || exit /b 1
 cl %CLFLAGS% test\alloc_host.cpp /Fobuild\alloctest\ /Fe:build\alloctest\alloc_host.exe /link /NOLOGO build\alloctest\alloc_testdll.lib || exit /b 1
 copy /y test\alloc_test.ini build\alloctest\stellaris-engine-fixes.ini >nul || exit /b 1

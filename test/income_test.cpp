@@ -42,6 +42,35 @@ void Check(const char* what, const int64_t* t0, const int64_t* r, const int64_t*
 }  // namespace
 
 int main() {
+    auto require = [](bool ok, const char* what) {
+        if (!ok) { printf("FAIL %s\n", what); ++g_failures; }
+    };
+    {
+        int64_t value = 17;
+        require(!income::Difference(INT64_MAX, -1, value) && value == 17, "positive delta overflow");
+        require(!income::Difference(INT64_MIN, 1, value) && value == 17, "negative delta overflow");
+        require(income::Difference(INT64_MIN, INT64_MIN, value) && value == 0, "equal minimum delta");
+        require(income::Difference(-1, INT64_MIN, value) && value == INT64_MAX, "maximum valid delta");
+        require(income::Total(INT64_MAX - 6, 2, 3, value) && value == INT64_MAX, "maximum valid total");
+        require(income::Total(INT64_MIN + 6, -2, 3, value) && value == INT64_MIN, "minimum valid total");
+        value = 17;
+        require(!income::Total(INT64_MAX - 5, 2, 3, value) && value == 17, "positive total overflow");
+        require(!income::Total(INT64_MIN + 5, -2, 3, value) && value == 17, "negative total overflow");
+        require(!income::Total(0, INT64_MAX, 2, value) && value == 17, "product overflow");
+        require(!income::Total(0, INT64_MIN, -1, value) && value == 17, "minimum times negative one");
+    }
+    {
+        // The first threshold distance is UINT64_MAX: its quotient + 1 used to wrap
+        // to zero and discard a valid stopping condition from the other resource.
+        int64_t t0[] = {INT64_MIN, 0}, r[] = {1, 1}, target[] = {INT64_MAX, 2};
+        require(income::Rounds(t0, r, target, 2, 1) == 3, "full-width distance with another stopping resource");
+        require(income::Rounds(t0, r, target, 1, 1) == -1, "counter cannot reach full-width distance");
+        require(income::Rounds(t0, r, target, 2, -1) == -1, "invalid observed round count");
+        t0[0] = INT64_MIN + 1; r[0] = -1;
+        require(income::Rounds(t0, r, target, 2, 2) == -1, "observed negative resource already overflowed");
+        t0[0] = INT64_MAX - 1; r[0] = 1;
+        require(income::Rounds(t0, r, target, 2, 2) == -1, "observed positive resource already overflowed");
+    }
     // The case seen in the game: one resource grows by 500000 a round towards 6.37e14.
     {
         int64_t t0[3] = {1000000, 0, 323971963500000 - 647943923LL * 500000};

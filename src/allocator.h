@@ -22,8 +22,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 #include <mimalloc.h>
+#include "logging.h"
 
 #include "locate.h"
 
@@ -222,7 +224,6 @@ size_t __cdecl Msize(void* p) {
 
 // --- Install ---------------------------------------------------------------------------------
 
-using LogFn = void (*)(const char* fmt, ...);
 
 struct Status {
     bool installed = false;
@@ -248,9 +249,39 @@ LogFn g_log = nullptr;
 
 inline void MimallocOutput(const char* msg, void*) {
     if (!g_log) return;
-    std::string s(msg);
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-    if (!s.empty()) g_log("mimalloc: %s", s.c_str());
+    // The live callback receives the prefix and message separately. Startup
+    // diagnostics are replayed together in a single buffer.
+    static thread_local LogLevel pending = LogLevel::Debug;
+    constexpr std::string_view prefix = "mimalloc: ";
+    std::string_view remaining(msg);
+    while (!remaining.empty()) {
+        size_t newline = remaining.find('\n');
+        auto line = remaining.substr(0, newline);
+        remaining.remove_prefix(newline == remaining.npos ? remaining.size() : newline + 1);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        LogLevel level = pending;
+        pending = LogLevel::Debug;
+        if (line.substr(0, prefix.size()) == prefix) {
+            line.remove_prefix(prefix.size());
+            level = LogLevel::Debug;
+            if (line.substr(0, 7) == "error: ") {
+                line.remove_prefix(7);
+                level = LogLevel::Error;
+            } else if (line.substr(0, 9) == "warning: ") {
+                line.remove_prefix(9);
+                level = LogLevel::Warn;
+            } else if (line.substr(0, 17) == "assertion failed:") {
+                level = LogLevel::Error;
+            }
+            // Worker prefixes may end in "thread 0x...: ".
+            if (newline == remaining.npos &&
+                (line.empty() || (line.substr(0, 9) == "thread 0x" && line.substr(line.size() - 2) == ": "))) {
+                pending = level;
+                continue;
+            }
+        }
+        if (!line.empty()) g_log(level, "mimalloc", "%.*s", static_cast<int>(line.size()), line.data());
+    }
 }
 
 inline std::string Narrow(const wchar_t* w) {
@@ -270,13 +301,14 @@ inline bool Install(const locate::Image& img, LogFn log) {
     mi_register_output(&MimallocOutput, nullptr);  // also prints what mimalloc said while starting
     const Settings& st = g_settings;
     if (!st.hostMatches) {
-        log("allocator: the process is not %s; its heap is left alone", Narrow(SEF_HOST_EXE).c_str());
+        log(LogLevel::Debug, "allocator", "host does not match %s", Narrow(SEF_HOST_EXE).c_str());
         return false;
     }
     std::string set, skipped;
     for (int i = 0; i < st.setCount; ++i) set += " " + Narrow(st.set[i]);
     for (int i = 0; i < st.skippedCount; ++i) skipped += " " + Narrow(st.skipped[i]);
-    log("allocator: stellaris-engine-fixes.ini %s; mimalloc %s, reserve_huge_os_pages=%ld%s%s%s%s%s", st.fileFound ? "read" : "not found",
+    log(st.badCount ? LogLevel::Warn : LogLevel::Info, "allocator",
+        "stellaris-engine-fixes.ini %s; mimalloc %s, reserve_huge_os_pages=%ld%s%s%s%s%s", st.fileFound ? "read" : "not found",
         st.disabled ? "off" : "on", st.hugePages, set.empty() ? "" : "; set", set.c_str(),
         skipped.empty() ? "" : "; already in the environment, kept:", skipped.c_str(),
         st.badCount ? "; some lines were not understood" : "");
@@ -285,11 +317,11 @@ inline bool Install(const locate::Image& img, LogFn log) {
 
     std::string error;
     if (!locate::LocateCrtHeap(img, g_status.crt, error)) {
-        log("allocator: %s; the game keeps its own heap", error.c_str());
+        log(LogLevel::Error, "allocator", "%s; the game keeps its own heap", error.c_str());
         return false;
     }
     if (*g_status.crt.heap != nullptr) {
-        log("allocator: the game's CRT has already started; the game keeps its own heap");
+        log(LogLevel::Error, "allocator", "the game's CRT has already started; the game keeps its own heap");
         return false;
     }
     if (st.hugePages > 0) {
@@ -301,9 +333,12 @@ inline bool Install(const locate::Image& img, LogFn log) {
                                                       static_cast<size_t>(st.hugePages) * 500);
         mi_process_info(nullptr, nullptr, nullptr, nullptr, nullptr, &after, nullptr, nullptr);
         g_status.hugePagesReserved = static_cast<long>((after - before + (size_t(1) << 29)) >> 30);
-        log("allocator: asked for %ld GiB of huge pages, got %ld GiB in %lld ms%s", st.hugePages,
-            g_status.hugePagesReserved, GetTickCount64() - t0,
-            err == 0 ? "" : "; Windows has no contiguous memory left (a restart of Windows frees it)");
+        log(LogLevel::Stats, "allocator", "huge_pages_requested_gib=%ld huge_pages_reserved_gib=%ld reservation_ms=%llu",
+            st.hugePages, g_status.hugePagesReserved, GetTickCount64() - t0);
+        if (err != 0 || g_status.hugePagesReserved < st.hugePages) {
+            log(LogLevel::Warn, "allocator", "reserved %ld of %ld GiB of huge pages (mimalloc result %d)",
+                g_status.hugePagesReserved, st.hugePages, err);
+        }
     }
     const locate::CrtHeapLocations& c = g_status.crt;
     struct {
@@ -316,24 +351,24 @@ inline bool Install(const locate::Image& img, LogFn log) {
         if (!WriteJump(h.at, h.to)) {
             // Nothing has been allocated yet, so the functions already patched are harmless only
             // if every one is: stop the process from starting half-switched.
-            log("allocator: failed to patch %p (error %lu); exiting", h.at, GetLastError());
+            log(LogLevel::Error, "allocator", "failed to patch %p (error %lu); exiting", h.at, GetLastError());
             ExitProcess(1);
         }
     }
     g_status.installed = true;
-    log("allocator: mimalloc %d.%d.%d replaces the game's heap", MI_MALLOC_VERSION / 10000,
+    log(LogLevel::Info, "allocator", "mimalloc %d.%d.%d replaces the game's heap", MI_MALLOC_VERSION / 10000,
         MI_MALLOC_VERSION / 100 % 100, MI_MALLOC_VERSION % 100);
     return true;
 }
 
 // One summary line, or empty when not installed.
-inline std::string Summary() {
+inline std::string Stats() {
     if (!g_status.installed) return {};
     size_t elapsed, user, sys, rss, peakRss, commit, peakCommit, faults;
     mi_process_info(&elapsed, &user, &sys, &rss, &peakRss, &commit, &peakCommit, &faults);
-    char buf[256];
-    sprintf_s(buf, "allocator: commit %zu MiB (peak %zu), working set %zu MiB (peak %zu), huge pages %ld GiB, "
-              "foreign blocks: %llu frees, %llu reallocs, %llu sizes",
+    char buf[320];
+    sprintf_s(buf, "commit_mib=%zu peak_commit_mib=%zu working_set_mib=%zu peak_working_set_mib=%zu huge_pages_gib=%ld "
+              "foreign_frees=%llu foreign_reallocs=%llu foreign_sizes=%llu",
               commit >> 20, peakCommit >> 20, rss >> 20, peakRss >> 20, g_status.hugePagesReserved,
               static_cast<unsigned long long>(g_foreignFrees.load()),
               static_cast<unsigned long long>(g_foreignReallocs.load()),

@@ -1,0 +1,8 @@
+# The AI values a free system bordering it at EXPANSION_BORDERING_PRIORITY (500), but a system whose
+# every hyperlane neighbour is already the AI's (a dead end, or a hole in its territory) gets this
+# define instead. At the vanilla 10 such a system is only claimed when an idle construction ship is
+# within 2 jumps, so it usually stays empty all game. 510 ranks it just above a frontier system.
+# See re/ai.md section 2.14.
+NAI = {
+	EXPANSION_CUT_OFF_SYSTEM_PRIORITY = 510
+}

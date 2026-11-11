@@ -1,4 +1,7 @@
 /build/
+/executables/
+/stellaris.exe
+__pycache__/
 *.obj
 *.lib
 *.exp

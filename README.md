@@ -1,7 +1,7 @@
 # stellaris-engine-fixes
 
-Performance, load-time, interface and AI fixes for Stellaris, as a DLL the game loads itself
-(Steam, Windows; written against 4.5.2, checked on 4.5.3).
+Performance, load-time, interface, AI and numeric fixes for Stellaris on Windows.
+Offline checks cover Steam and GOG builds 4.5.2 through 4.5.4.
 
 `winmm.dll` goes in the game folder; Windows loads it into the game. Each feature finds the code
 it needs by byte patterns, so it should survive updates that don't change that code. A feature
@@ -11,12 +11,37 @@ files is changed.
 Settings are in `stellaris-engine-fixes.ini`. Speed features that have a `..._verify=1` setting can also run
 the game's own code next to the shortcut and log any difference to `stellaris-engine-fixes.log`.
 
+## Logs
+
+`stellaris-engine-fixes.log` stays beside the DLL and is rewritten at launch. Each line has a UTC timestamp,
+a level, a component, and a message.
+
+```text
+2026-11-11T18:30:00.123Z INFO  fleets | hooks installed
+2026-11-11T18:30:00.145Z WARN  file_lookups | GetFileAttributesExW isn't imported; only opens are answered
+2026-11-11T18:30:00.167Z ERROR token_strings | failed to hook RebuildLookup; off
+2026-11-11T18:30:30.124Z STATS fleets | sorts=410 compares=9300 keys=2050 avg_us=8.1 max_us=52.0 faulted=0
+```
+
+`ERROR` covers failed operations and verification mismatches. `WARN` covers partial fallbacks and
+configuration problems. `INFO` covers normal operation, and `DEBUG` covers hook details and traces.
+`STATS` covers startup timings, periodic counters, and `sef_bench` results.
+
+For parsing, split at the first ` | ` and read the three whitespace-separated fields on the left.
+Messages escape backslashes as `\\`, CR/LF/tab as `\r`, `\n`, and `\t`, and other ASCII controls as
+`\xHH`. `STATS` messages are space-separated `key=value` fields. Numeric units are in the keys
+where applicable, and booleans are `0` or `1`.
+
 ## Interface
 
 - **Fleet outliner order:** fleets sorted by name, naturally ("Fleet 2" before "Fleet 10"); fleets
   with the same name by their oldest ship's construction date.
 - **Megastructure outliner order:** megastructures sorted by their current name, the same way;
   same-name ones stay in the order they were acquired.
+- **Trade amounts** (`trade_amount_entry`). Alt-click the amount or its **+** or **−** button in an
+  empire deal or the market’s monthly trade window to open a focused amount field.
+- **Planet construction priority** (`planet_queue_first`). Ctrl-click to put a new construction
+  item at the front of the planet’s queue in single player.
 
 ## Performance
 
@@ -65,7 +90,7 @@ frames between ticks. `sef_bench stop` ends a run, `sef_bench show` prints the l
 ## AI fixes (`[ai_fixes]`, each off by default)
 
 These are places where the country AI's code disagrees with itself or with its own defines. Unlike the speed features they change how AI empires play, so each one is opt-in.
-They act on the AI only and don't change saves. Single player; multiplayer is untested.
+These fixes affect AI empires. Multiplayer behavior remains unverified.
 
 - **Build plan** (`build_plan_keep`): the AI makes a planet build plan once a month, uses it for a
   week, then deletes it, and its walk of the plan stops at the first item it can't place. With
@@ -88,12 +113,28 @@ They act on the AI only and don't change saves. Single player; multiplayer is un
 - **AI random** (`ai_random_from_save`): a loaded AI restarts its random number stream at its id
   unless the game runs with `-loadrandomseed`. The fix makes it continue the stream stored in the
   save.
+- **Build plan and expansion**. Optional settings let the AI skip unaffordable plan items,
+  retry surveys monthly, and resume expansion when colony ships or construction ships sit idle.
+- **War planning**. Optional settings make the AI check whether it can start war preparations
+  and account for the threat of hostile boss fleets.
+
+## Numeric fixes (`[numeric_fixes]`, each off by default)
+
+Optional fixes address fixed-point overflow and rounding in income, stockpiles, diplomatic weight,
+and fleet and ship statistics. The INI describes each setting.
+
+## Multiplayer settings
+
+The DLL includes active gameplay-changing AI and numeric fixes in the game checksum by default.
+Use the same DLL and gameplay settings on all peers.
 
 ## Script storage for mods (`[script_storage]`)
 
 Paradox script can keep data outside the game, in the `sefdata` folder in the game folder, with
 `log = "@sef:..."` effects and triggers. Nothing happens unless a mod uses them; without the DLL
-they are ordinary `log` lines. Off in multiplayer, where each machine would read different files.
+they are ordinary `log` lines. Multiplayer storage is off by default. Experimental
+`[script_storage] multiplayer=1` lets the host share store snapshots with clients. Only the host
+writes the store files, and `run` is disabled in multiplayer. Live multiplayer validation is pending.
 
 Two stores: `global`, shared by every game (`sefdata\global.txt`), and `save`, which follows the
 save game (`sefdata\saves\<folder>\<name>.txt`: written once a save, including Ironman's save on
@@ -125,8 +166,6 @@ My Preset**, records the settings with Gigastructures' own preset printer, and t
 Preset** button loads them in a later game. Copy the folder into `Documents\Paradox
 Interactive\Stellaris\mod`, add it in the launcher, and load it after Gigastructures.
 
-Status: the patterns are checked on Steam 4.5.2 and 4.5.3 and on GOG 4.5.2.
-
 ## Build
 
 Needs Visual Studio (2022 or later, any edition, or the Build Tools) with the C++ x64 tools;
@@ -149,18 +188,18 @@ Delete `winmm.dll` from the game folder. To keep the rest but go back to the gam
 
 ## Tests
 
-```bat
-build\natsort_test.exe
-build\pathcache_test.exe
-build\income_test.exe
-build\proxy_test.exe
-build\pdxstore_test.exe
-build\locate_test.exe <path to stellaris.exe> --expect-known
-build\alloctest\alloc_host.exe
+Run offline validation from the repository root with Python 3.10+ and the C++ build tools.
+
+```powershell
+python tools/validate_builds.py --exe 'D:\Games\Stellaris\stellaris.exe'
+python tools/validate_builds.py --version 4.5.4
 ```
 
-`--expect-known` also checks every located address against the 4.5.2 Steam build; without it the
-test only requires every pattern to be found.
+Repeat `--exe` to check several installations. For version-based discovery, place Windows game
+executables in `executables/` with names such as `stellaris_454_steam.exe` or
+`stellaris_454_gog.exe`. The runner writes test logs and `report.json` under `build/validation-*/`.
+It checks WinMM imports, signatures, layouts, and patch installation offline. Live gameplay and
+multiplayer require separate testing.
 
 ## Layout
 

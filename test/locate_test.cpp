@@ -7,7 +7,92 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../src/aibossthreat.h"
+#include "../src/aifleettrace.h"
+#include "../src/aiwarguard.h"
 #include "../src/locate.h"
+
+static bool TestBossThreatStub(aibossthreat::Locations found) {
+    constexpr uint8_t setup[] = {
+        0x53, 0x41, 0x56,  // push rbx; push r14
+        0x48, 0x8B, 0xD9,  // mov rbx, rcx
+        0x48, 0x8B, 0xC2,  // mov rax, rdx
+        0x4D, 0x8B, 0xF0,  // mov r14, r8
+    };
+    constexpr uint8_t finish[] = {0x41, 0x5E, 0x5B, 0xC3};  // pop r14; pop rbx; ret
+    auto buffer = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_RESERVE | MEM_COMMIT,
+                                                      PAGE_EXECUTE_READWRITE));
+    if (!buffer) return false;
+    auto end = buffer + 64 - sizeof(finish);
+    found.resume = end;
+    const auto code = aibossthreat::ThreatStub(found);
+    memcpy(buffer, setup, sizeof(setup));
+    memcpy(buffer + sizeof(setup), code.data(), code.size());
+    memcpy(end, finish, sizeof(finish));
+    FlushInstructionCache(GetCurrentProcess(), buffer, 64);
+
+    using Estimate = void (*)(const int64_t*, int64_t, int64_t*);
+    auto estimate = reinterpret_cast<Estimate>(buffer);
+    std::vector<int64_t> fleet(found.cachedPower / sizeof(int64_t) + 1);
+    constexpr int64_t floor = 40000LL << 15;
+    constexpr int64_t avatar = 119032LL << 15;
+    const struct { int64_t cached; int64_t minimum; int64_t expected; } cases[] = {
+        {0, floor, floor},
+        {-1, floor, floor},
+        {floor, floor, floor},
+        {avatar, floor, avatar},
+        {avatar, INT64_MAX, INT64_MAX},
+        {INT64_MAX, floor, INT64_MAX},
+    };
+    bool ok = true;
+    for (const auto& test : cases) {
+        fleet.back() = test.cached;
+        int64_t result = -1;
+        estimate(fleet.data(), test.minimum, &result);
+        if (result != test.expected) ok = false;
+    }
+    VirtualFree(buffer, 0, MEM_RELEASE);
+    return ok;
+}
+
+static bool TestWarRefreshStub(const aiwarguard::Locations& war) {
+    // Match the native flag write's inputs: RDI points to the AI, EAX is the negated bool.
+    constexpr uint8_t setup[] = {0x57, 0x48, 0x8B, 0xF9, 0x8B, 0xC2};  // push rdi; mov rdi, rcx; mov eax, edx
+    constexpr uint8_t finish[] = {0x5F, 0xC3};                          // pop rdi; ret
+    auto buffer = static_cast<uint8_t*>(VirtualAlloc(nullptr, 128, MEM_RESERVE | MEM_COMMIT,
+                                                      PAGE_EXECUTE_READWRITE));
+    if (!buffer) return false;
+    auto end = buffer + 126;
+    auto code = aiwarguard::RefreshStub(war, end);
+    memcpy(buffer, setup, sizeof(setup));
+    memcpy(buffer + sizeof(setup), code.data(), code.size());
+    memcpy(end, finish, sizeof(finish));
+    FlushInstructionCache(GetCurrentProcess(), buffer, 128);
+
+    using SetPrepareWar = void (*)(uint32_t*, int);
+    auto set = reinterpret_cast<SetPrepareWar>(buffer);
+    std::vector<uint32_t> ai(war.aiFlags / sizeof(uint32_t) + 1);
+    auto& flags = ai.back();
+    constexpr uint32_t other = 0x400;
+    constexpr uint32_t preparing = aiwarguard::kPreparing;
+    constexpr uint32_t dirty = aiwarguard::kNeedStrategicWarData;
+    const struct { uint32_t before; int prepare; uint32_t after; } cases[] = {
+        {other, 0, other},
+        {other, -1, other | preparing},
+        {other | preparing, -1, other | preparing},
+        {other | preparing, 0, other | dirty},
+        {other | preparing | dirty, 0, other | dirty},
+        {other | dirty, -1, other | preparing | dirty},
+    };
+    bool ok = true;
+    for (const auto& test : cases) {
+        flags = test.before;
+        set(ai.data(), test.prepare);
+        if (flags != test.after) ok = false;
+    }
+    VirtualFree(buffer, 0, MEM_RELEASE);
+    return ok;
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -62,9 +147,11 @@ int main(int argc, char** argv) {
     expect("shipDateOffset", loc.shipDateOffset, 0xf98);
 
     // The name function the fleet's vtable slot points to (CFleet::GetLocalizedName).
-    bool thunk = locate::IsFleetNameThunk(str, base + 0x1af370);
-    printf("  fleet name thunk at 0x1AF370 %s\n", thunk ? "recognized" : "NOT recognized");
-    if (expectKnown && !thunk) ++failures;
+    if (expectKnown) {
+        bool thunk = locate::IsFleetNameThunk(str, base + 0x1af370);
+        printf("  fleet name thunk at 0x1AF370 %s\n", thunk ? "recognized" : "NOT recognized");
+        if (!thunk) ++failures;
+    }
 
     locate::MegaLocations mega;
     if (!locate::LocateMega(img, mega, error)) {
@@ -108,6 +195,60 @@ int main(int argc, char** argv) {
     expect("g_CurrentGameState", rva(bench.gameState), 0x3114700);
     expect("idlerMultiplayer", bench.idlerMultiplayer, 0x180);
 
+    locate::SaveLocations saves;
+    if (!locate::LocateSaves(img, saves, error)) {
+        printf("FAIL saves: %s\n", error.c_str());
+        return 1;
+    }
+    printf("located saving and loading\n");
+    expect("StartSaveToPath", rva(saves.startSave), 0xa890d0);
+    expect("CGameState::Load", rva(saves.load), 0x264110);
+    expect("OnNewGameStarted", rva(saves.newGame), 0x2710d0);
+    expect("g_bIsReadingSaveFile", rva(saves.readingSave), 0x3114e21);
+    locate::SaveWriteLocations saveWrite;
+    if (!locate::LocateSaveWrite(img, saves, saveWrite, error)) {
+        printf("FAIL save write: %s\n", error.c_str());
+        return 1;
+    }
+    printf("located save completion\n");
+    expect("ZipAndWrite", rva(saveWrite.zipAndWrite), 0xa8a1f0);
+    expect("save parameters", saveWrite.paramsOffset, 0x70);
+    expect("archive destructor", rva(saveWrite.destroyArchive), 0x1b3af20);
+    expect("PHYSFS_close", rva(saveWrite.closeFile), 0x1b685e0);
+    expect("cloud write", rva(saveWrite.cloudWrite), 0x1c9f270);
+    expect("zip AddFile", rva(saveWrite.addFile), 0x1d03420);
+
+    locate::VariableLocations vars;
+    locate::LogScriptLocations logs;
+    locate::MultiplayerLocations mp;
+    uint8_t *effectCommand = nullptr, *readExecute = nullptr;
+    if (!locate::LocateVariables(img, vars, error) ||
+        !locate::LocateLogScript(img, vars.effectName, vars.triggerName, logs, error) ||
+        !locate::LocateMultiplayer(img, mp, error) ||
+        !locate::LocateEffectCommand(img, bench.gameState, &effectCommand, &readExecute, error)) {
+        printf("FAIL script storage: %s\n", error.c_str());
+        return 1;
+    }
+    printf("located script storage\n");
+    expect("AccessVariablePointer", rva(vars.access), 0x9f7df0);
+    expect("GetVariablePointer", rva(vars.get), 0x9f7ec0);
+    expect("variables find", rva(vars.find), 0x227390);
+    expect("CVariables::SetVariable", rva(vars.set), 0x7aae10);
+    expect("variables map", vars.map, 0x8);
+    expect("entry empty", vars.entryEmpty, 0x4);
+    expect("entry value", vars.entryValue, 0x38);
+    expect("variable effect name", vars.effectName, 0xc0);
+    expect("variable trigger name", vars.triggerName, 0x220);
+    expect("storage logEffect", rva(logs.logEffect), 0x1743450);
+    expect("storage logTrigger", rva(logs.logTrigger), 0x19a7cf0);
+    expect("log effect text", logs.logEffectText, 0xc0);
+    expect("log trigger text", logs.logTriggerText, 0x220);
+    expect("log text call", rva(logs.textCall), 0x17434f3);
+    expect("ProcessString", rva(logs.processString), 0x9d3140);
+    expect("multiplayer session", rva(mp.session), 0x3114e68);
+    expect("multiplayer flag", mp.flag, 0x180);
+    expect("storage effect command", rva(effectCommand), 0xec6390);
+    expect("storage readExecute", rva(readExecute), 0xec58f0);
     locate::IntelLocations intel;
     if (!locate::LocateIntel(img, intel, error)) {
         printf("FAIL fleet intel: %s\n", error.c_str());
@@ -184,6 +325,10 @@ int main(int argc, char** argv) {
         {"the expansion data refresh", locate::LocateExpansionRefresh},
         {"the AI's day counters", locate::LocateAiSchedule},
         {"the AI's saved random", locate::LocateSavedRandom},
+        {"the build plan's skip", locate::LocatePlanSkip},
+        {"the idle colony ship count", locate::LocateColonizerIdle},
+        {"the construction ship's range", locate::LocateStationRange},
+        {"the survey blacklist's clear", locate::LocateSurveyBlacklist},
     };
     for (auto& part : aiParts) {
         if (!part.locate(img, ai, error)) {
@@ -192,7 +337,48 @@ int main(int argc, char** argv) {
         }
     }
     printf("located the AI fixes\n");
+    aibossthreat::Locations boss;
+    if (!aibossthreat::Locate(img, boss, error)) {
+        printf("FAIL AI boss threat floor: %s\n", error.c_str());
+        return 1;
+    }
+    if (!TestBossThreatStub(boss)) {
+        printf("FAIL AI boss threat floor stub\n");
+        return 1;
+    }
+    printf("located and tested the AI boss threat floor\n");
+    expect("boss estimate store", rva(boss.site), 0xba4abf);
+    expect("cached fleet power", boss.cachedPower, 0x308);
+    aiwarguard::Locations war;
+    if (!aiwarguard::Locate(img, war, error)) {
+        printf("FAIL AI war plan check: %s\n", error.c_str());
+        return 1;
+    }
+    if (!TestWarRefreshStub(war)) {
+        printf("FAIL AI war plan cancellation refresh\n");
+        return 1;
+    }
+    printf("located the AI declaration check and tested the cancellation refresh\n");
+    aifleettrace::Locations fleetTrace;
+    if (!aifleettrace::Locate(img, fleetTrace)) {
+        printf("FAIL AI fleet trace: signatures or call targets changed\n");
+        ++failures;
+    } else {
+        printf("located the AI fleet trace\n");
+    }
+    expect("war score", rva(war.score), 0xc3cc20);
+    expect("war declaration eligibility", rva(war.isPossible), 0x9ac4b0);
+    expect("war cancellation flag write", rva(war.refresh), 0x6c347c);
     expect("plan walk", rva(ai.planWalk), 0xbc36b0);
+    expect("plan stop jump", rva(ai.planStopJump), 0xbc378f);
+    expect("plan continue", rva(ai.planContinue), 0xbc3c89);
+    expect("colonizer idle count", rva(ai.colonizerIdle), 0xbb67ee);
+    expect("colonizer ship count", ai.colonizerShipCount, 0x32c);
+    expect("BuildStation", rva(ai.buildStation), 0xbbf870);
+    expect("outpost penalty load", rva(ai.penaltyLoadOutpost), 0xbbe795);
+    expect("station penalty load", rva(ai.penaltyLoadStation), 0xbbf728);
+    expect("station penalty", rva(ai.stationPenalty), 0x3151db8);
+    expect("survey blacklist jump", rva(ai.blacklistJump), 0xbb58b9);
     expect("minister strategy", ai.ministerStrategy, 0x88);
     expect("plan array", ai.planArray, 0x30);
     expect("plan Clear call", rva(ai.planClearCall), 0xbc3cc6);
@@ -237,55 +423,6 @@ int main(int argc, char** argv) {
     expect("saved random_count jump", rva(ai.savedRandomJumps[0]), 0xb77b02);
     expect("saved random_seed jump", rva(ai.savedRandomJumps[1]), 0xb77b41);
     expect("g_bUseSavedRandom", rva(ai.useSavedRandom), 0x3114e38);
-
-    locate::VariableLocations vars;
-    locate::LogScriptLocations logs;
-    locate::MultiplayerLocations mp;
-    locate::SaveLocations saves;
-    uint8_t *effectCommand = nullptr, *readExecute = nullptr;
-    if (!locate::LocateVariables(img, vars, error) ||
-        !locate::LocateLogScript(img, vars.effectName, vars.triggerName, logs, error) ||
-        !locate::LocateMultiplayer(img, mp, error) || !locate::LocateSaves(img, nullptr, saves, error) ||
-        !locate::LocateEffectCommand(img, bench.gameState, &effectCommand, &readExecute, error)) {
-        printf("FAIL script storage: %s\n", error.c_str());
-        return 1;
-    }
-    printf("located script storage\n");
-    expect("AccessVariablePointer", rva(vars.access), 0x9f7df0);
-    expect("GetVariablePointer", rva(vars.get), 0x9f7ec0);
-    expect("variables find", rva(vars.find), 0x227390);
-    expect("CVariables::SetVariable", rva(vars.set), 0x7aae10);
-    expect("variables map", vars.map, 0x8);
-    expect("entry empty", vars.entryEmpty, 0x4);
-    expect("entry value", vars.entryValue, 0x38);
-    expect("variable effect name", vars.effectName, 0xc0);
-    expect("variable trigger name", vars.triggerName, 0x220);
-    expect("logEffect", rva(logs.logEffect), 0x1743450);
-    expect("logTrigger", rva(logs.logTrigger), 0x19a7cf0);
-    expect("logEffectText", logs.logEffectText, 0xc0);
-    expect("logTriggerText", logs.logTriggerText, 0x220);
-    expect("log text call", rva(logs.textCall), 0x17434f3);
-    expect("ProcessString", rva(logs.processString), 0x9d3140);
-    expect("multiplayer session", rva(mp.session), 0x3114e68);
-    expect("multiplayer flag", mp.flag, 0x180);
-    expect("StartSaveToPath", rva(saves.startSave), 0xa890d0);
-    expect("CGameState::Load", rva(saves.load), 0x264110);
-    expect("OnNewGameStarted", rva(saves.newGame), 0x2710d0);
-    expect("g_bIsReadingSaveFile", rva(saves.readingSave), 0x3114e21);
-    expect("OnExecute_Effect", rva(effectCommand), 0xec6390);
-    expect("ReadAndExecuteEffect", rva(readExecute), 0xec58f0);
-    locate::SaveWriteLocations saveWrite;
-    if (!locate::LocateSaveWrite(img, saves, saveWrite, error)) {
-        printf("FAIL save write: %s\n", error.c_str());
-        return 1;
-    }
-    printf("located save completion\n");
-    expect("ZipAndWrite", rva(saveWrite.zipAndWrite), 0xa8a1f0);
-    expect("save parameters", saveWrite.paramsOffset, 0x70);
-    expect("archive destructor", rva(saveWrite.destroyArchive), 0x1b3af20);
-    expect("PHYSFS_close", rva(saveWrite.closeFile), 0x1b685e0);
-    expect("cloud write", rva(saveWrite.cloudWrite), 0x1c9f270);
-    expect("zip AddFile", rva(saveWrite.addFile), 0x1d03420);
 
     locate::LexerLocations lexer;
     if (!locate::LocateLexer(img, lexer, error)) {

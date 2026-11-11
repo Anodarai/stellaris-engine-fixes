@@ -42,13 +42,8 @@ using RunCommandFn = void(__fastcall*)(void* console, const String* line);
 constexpr size_t kArrayDataOffset = 0x8;    // String*
 constexpr size_t kArrayCountOffset = 0x14;  // int
 
-// C# scripts: the console's `effect` command, and the player's country.
+// The console's `effect` command, used by script storage.
 using EffectCommandFn = ConsoleResult*(__fastcall*)(ConsoleResult* out, const uint8_t* args);
-using LocalObservedFn = uint8_t*(__fastcall*)(uint8_t* state);
-// Amounts are CFixedPoint: the value times 100000, passed by value.
-using ChangeResourceFn = void(__fastcall*)(uint8_t* country, const uint8_t* resource, int64_t amount);
-using GetResourceFn = int64_t*(__fastcall*)(uint8_t* country, int64_t* out, const uint8_t* resource);
-using FindResourceFn = const uint8_t*(__fastcall*)(uint8_t* database, const String* key);
 
 // The tick loop.
 using CheckTickFn = uint64_t(__fastcall*)(uint8_t* idler, float frameSeconds);

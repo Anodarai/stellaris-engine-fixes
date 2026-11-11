@@ -19,7 +19,7 @@ jobs:
         shell: cmd
         run: call build.bat
 
-      # locate_test is left out: it needs a copy of stellaris.exe.
+      # Run tests that do not require a copy of stellaris.exe.
       - name: Run tests
         shell: pwsh
         run: |
@@ -28,6 +28,13 @@ jobs:
             "build/pathcache_test.exe"
             "build/income_test.exe"
             "build/proxy_test.exe"
+            "build/logging_test.exe"
+            "build/game_imports_test.exe"
+            "build/incomeaccumulator_test.exe"
+            "build/pdxstore_test.exe"
+            "build/mpchecksum_test.exe"
+            "build/mpstore_test.exe"
+            "build/mpstore-runtime-test/mpstore_runtime_test.exe"
             "build/alloctest/alloc_host.exe"
           )
 

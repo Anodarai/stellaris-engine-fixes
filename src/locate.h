@@ -141,6 +141,27 @@ struct AiFixLocations {
     size_t colonyCheckObject = 0;       // CColony: sub-object whose vtable slot says the colony is usable
     size_t colonyCheckSlot = 0;         // that slot's byte offset
     uint8_t* hasQueued = nullptr;       // CColony::HasQueuedBuildingOrDistrictConstruction(colony)
+    // 2.16 The walk's `jz` taken when an item fails its check (to the Clear call: the walk stops),
+    // and the loop's continue, which reloads the registers the check call clobbered.
+    uint8_t* planStopJump = nullptr;
+    uint8_t* planContinue = nullptr;
+
+    // 2.17 CAIInteriorMinister::BuildColonizer's count of idle colony ships: `mov eax,[rdi+ships];
+    // add r15d,eax` (9 bytes, replaced), rdi the fleet. Volatile registers are dead after it.
+    uint8_t* colonizerIdle = nullptr;
+    size_t colonizerShipCount = 0;      // CFleet: int ship count, as read there
+
+    // 2.18 CAIInteriorMinister::BuildStation(minister, fleet, ...) (hooked), and the two loads of
+    // NDefines::NAI::CONSTRUCTION_SHIP_DISTANCE_PENALTY (7 bytes each, replaced): into r10 in
+    // FindPlanetForStarbase, into r8 in FindDepositHolderForOrbitalStation.
+    uint8_t* buildStation = nullptr;
+    uint8_t* penaltyLoadOutpost = nullptr;
+    uint8_t* penaltyLoadStation = nullptr;
+    int64_t* stationPenalty = nullptr;  // the define, CFixedPoint
+
+    // 2.15 CAIInteriorMinister::MonthlyUpdate: `jne` over the clearing of the survey blacklist,
+    // taken unless the month is country id % 12.
+    uint8_t* blacklistJump = nullptr;
 
     // 2.3 The opportunist pass of CCountryAI::IsReadyForWarWith (replaced from its first byte to
     // `join`). Registers there: r14 our country, [rbp+targetSlot] the target, rsi the first pass's
@@ -202,6 +223,14 @@ struct LexerLocations {
 // CModifier::LogDefinitions: only builds the text of modifiers.log and logs it.
 struct ModifierDocsLocations {
     uint8_t* logDefinitions = nullptr;
+};
+
+// Saving and loading for the Paradox script save store.
+struct SaveLocations {
+    uint8_t* startSave = nullptr;  // CSaveGameTaskManager::StartSaveToPath(manager, const CString& path, bool, bool, bool) -> 0 when started (hooked)
+    uint8_t* load = nullptr;       // CGameState::Load(state, CFile*, const CString& path) (hooked)
+    uint8_t* newGame = nullptr;    // CGameState::OnNewGameStarted(state) (hooked)
+    uint8_t* readingSave = nullptr;  // &g_bIsReadingSaveFile, which Load sets
 };
 
 // The list of references the game resolves once all databases are loaded (re/load_time.md).
@@ -653,6 +682,40 @@ constexpr char kPlanItemCheck[] =
     "4C 8B F2 4C 8B E1 48 8B 0A E8 ?? ?? ?? ?? 4C 8B F8 48 8D 48 ?? 4C 8B 01 41 FF 50 ?? 84 C0 0F 84 ?? ?? ?? ?? "
     "49 8B CF E8 ?? ?? ?? ?? 84 C0 0F 85";
 
+// In the walk: the item check's call (+7) and the `jz` taken when it fails (+14, target +16).
+constexpr char kPlanWalkCheckCall[] = "49 8B D7 48 8D 4D ?? E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 49 8B 0F E8";
+// In the walk: the loop's continue, rcx = [rsp+X] (+4), rdx reloaded, then the index is incremented.
+constexpr char kPlanWalkContinue[] = "48 8B 4C 24 ?? 48 8B 95 ?? ?? ?? ?? 41 FF C4";
+
+// BuildColonizer: the end of a colony fleet's order walk (an order type compared, the next order
+// taken, its vtable asked), then the idle fleet's ships added: mov eax,[rdi+ships] (+30, the
+// offset +32), add r15d,eax (+36), and the code after them (+39).
+constexpr char kColonizerIdle[] =
+    "81 7B 18 ?? ?? 00 00 0F 84 ?? ?? ?? ?? 48 8B 5B 08 48 8B 03 48 8B CB FF 50 38 84 C0 75 ?? 8B 87 ?? ?? ?? ?? "
+    "44 03 F8 4C 8B 05";
+constexpr size_t kColonizerIdleBytes = 9;
+
+// MonthlyUpdate: the month read, country id % 12 (by multiplication), r14d = 0, then
+// cmp ecx,r8d; jne +4 (+34); mov [rsi+count],r14d.
+constexpr char kSurveyBlacklistClear[] =
+    "44 8B 83 ?? ?? ?? ?? 8B 4D ?? B8 AB AA AA AA F7 E1 C1 EA 03 8D 04 52 C1 E0 02 2B C8 45 33 F6 41 3B C8 75 04 "
+    "44 89 76 ??";
+
+// BuildStation: its prologue (15 bytes taken), the arguments kept, the first call.
+constexpr char kBuildStation[] =
+    "4C 89 44 24 18 48 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ?? ?? ?? ?? 48 8D 6C 24 ?? 48 89 9D "
+    "?? ?? ?? ?? 41 0F B6 F1 49 8B F8 4C 8B EA 48 8B D9 E8";
+constexpr size_t kBuildStationStolenBytes = 15;
+constexpr size_t kBuildStationSearch = 0x180;   // its calls of the two searches are within this
+constexpr size_t kStationSearchSize = 0x1000;   // a search's penalty load is this close to its start
+// FindPlanetForStarbase: jumps * 1.0 (fixed point), then the penalty into r10 (+27).
+constexpr char kPenaltyLoadOutpost[] =
+    "48 63 C8 48 69 D1 A0 86 01 00 48 8B 85 ?? ?? ?? ?? 48 63 00 48 69 C8 A0 86 01 00 4C 8B 15 ?? ?? ?? ?? 41 BB "
+    "33 F3 04 B5";
+// FindDepositHolderForOrbitalStation: jumps * -1.0, then the penalty into r8 (+10).
+constexpr char kPenaltyLoadStation[] = "48 63 C8 48 69 D1 60 79 FE FF 4C 8B 05 ?? ?? ?? ?? B9 33 F3 04 B5";
+constexpr size_t kPenaltyLoadBytes = 7;
+
 // IsReadyForWarWith: the opportunist pass, from its start (15 bytes there are replaced) into its
 // inner loop, GetAllies inlined. Offsets in LocateOpportunist.
 constexpr char kOpportunistPass[] =
@@ -819,6 +882,116 @@ inline bool LocateMega(const Image& img, MegaLocations& out, std::string& error)
     return true;
 }
 
+// OnExecute_Effect(SResult* out, const CPdxArray<CString>& args), the console's `effect`.
+//   +58 cmp [rip+g_CurrentGameState],rbx   +95 movsd xmm1,[rip+"No game state"]
+constexpr char kEffectCommand[] =
+    "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
+    "48 81 EC ?? ?? ?? ?? 4C 8B F2 48 8B F9 45 33 ED 41 8B DD 89 5C 24 30 48 39 1D ?? ?? ?? ?? 75 ?? "
+    "44 89 6C 24 58 4C 89 6C 24 60 48 C7 45 80 0F 00 00 00 48 C7 44 24 78 0D 00 00 00 F2 0F 10 0D";
+constexpr size_t kEffectCommandSearch = 0x290;  // it calls ReadAndExecuteEffect within this many bytes
+constexpr char kReadAndExecuteEffect[] =
+    "48 89 5C 24 08 48 89 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
+    "48 81 EC ?? ?? ?? ?? 4C 8B F1";
+// Inside it: +0 mov rcx,[rip+g_CurrentGameState]  +7 call CGameState::GetLocalObserved  +12 mov rsi,rax
+constexpr char kCallLocalObserved[] = "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B F0";
+constexpr size_t kReadAndExecuteEffectSearch = 0x100;
+constexpr size_t kReadAndExecuteEffectStringSearch = 0x1000;
+// CSaveGameTaskManager::StartSaveToPath: the prologue (15 bytes of spills taken), then
+//   +41 movzx r12d,r8b  +44 mov r13,rcx  +60 lea r14,[rdx+10h] and cmp qword [r14+18h],10h: the path
+//   is a CString (buffer at +0x10, capacity at +0x28)
+constexpr char kStartSaveToPath[] =
+    "48 89 5C 24 10 44 88 4C 24 20 44 88 44 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
+    "48 81 EC ?? ?? ?? ?? 45 0F B6 E0 4C 8B E9 45 33 FF 44 89 BD ?? ?? ?? ?? 4C 8D 72 10 49 8B D6 49 83 7E 18 10 "
+    "72 03 49 8B 16";
+constexpr size_t kStartSaveToPathStolenBytes = 15;
+// CGameState::Load(state, CFile*, const CString& path): the prologue (15 bytes of spills taken), then
+//   +39 mov r12,r8 (the path)  +56 lea rax,[g_bIsReadingSaveFile]  +67 movzx eax,byte [it]  +77 mov byte [it],1
+constexpr char kGameStateLoad[] =
+    "48 89 5C 24 08 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
+    "48 81 EC ?? ?? ?? ?? 4D 8B E0 48 8B F2 4C 8B F9 33 D2 89 95 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 45 ?? "
+    "0F B6 05 ?? ?? ?? ?? 88 45 ?? C6 05 ?? ?? ?? ?? 01";
+constexpr size_t kGameStateLoadStolenBytes = 15;
+// CGameState::OnNewGameStarted: the prologue (15 bytes of spills taken), then
+//   +42 movzx ebx,byte [g_AllowGetPlayer]  +55 mov byte [g_AllowGetPlayer],0  +62 call
+constexpr char kNewGameStarted[] =
+    "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
+    "48 81 EC ?? ?? ?? ?? 4C 8B F1 0F B6 1D ?? ?? ?? ?? 88 9D ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 00 E8";
+constexpr size_t kNewGameStartedStolenBytes = 15;
+// The console's `effect` command, OnExecute_Effect, and the ReadAndExecuteEffect it calls; `gameState` is
+// TickLocations::gameState. Script storage runs stored text through it.
+inline bool LocateEffectCommand(const Image& img, uint8_t** gameState, uint8_t** effectCommand, uint8_t** readExecute,
+                                std::string& error) {
+    struct Found {
+        uint8_t* effectCommand = nullptr;
+        uint8_t* readExecuteEffect = nullptr;
+    } out;
+    // The console's `trigger` command is compiled to the same bytes up to its call, so the call tells them apart.
+    Pattern runner = Parse(kReadAndExecuteEffect);
+    uint8_t* run = nullptr;
+    for (uint8_t* command : FindInCode(img, kEffectCommand)) {
+        for (uint8_t* p = command; p < command + kEffectCommandSearch; ++p) {
+            if (*p != 0xE8) continue;
+            uint8_t* target = RelTarget(p + 1, p + 5);  // not always a call: the byte may be part of another instruction
+            bool inCode = false;
+            for (const Section& s : img.code) {
+                inCode = inCode || (target >= s.begin && target + kReadAndExecuteEffectStringSearch <= s.end);
+            }
+            if (!inCode || !MatchAt(target, runner)) continue;
+            if (run) {
+                error = "OnExecute_Effect: more than one match";
+                return false;
+            }
+            run = target;
+            out.effectCommand = command;
+            out.readExecuteEffect = target;
+            break;
+        }
+    }
+    if (!run) {
+        error = "OnExecute_Effect: not found";
+        return false;
+    }
+    static const char kExecuting[] = "Executing effect script.";
+    bool executes = false;
+    for (uint8_t* p = run; p < run + kReadAndExecuteEffectStringSearch && !executes; ++p) {
+        const uint8_t* text = RelTarget(p, p + 4);
+        for (const Section& s : img.data) {
+            if (text >= s.begin && text + sizeof(kExecuting) <= s.end &&
+                memcmp(text, kExecuting, sizeof(kExecuting) - 1) == 0) {
+                executes = true;
+            }
+        }
+    }
+    if (!executes) {
+        error = "ReadAndExecuteEffect does not use its message";
+        return false;
+    }
+    if (reinterpret_cast<uint8_t**>(RelTarget(out.effectCommand + 58, out.effectCommand + 62)) != gameState) {
+        error = "OnExecute_Effect checks a different game state";
+        return false;
+    }
+    const char* noGameState = reinterpret_cast<const char*>(RelTarget(out.effectCommand + 95, out.effectCommand + 99));
+    if (memcmp(noGameState, "No game state", 13) != 0) {
+        error = "OnExecute_Effect's message is not the one expected";
+        return false;
+    }
+    auto observed = FindAll(run, run + kReadAndExecuteEffectSearch, Parse(kCallLocalObserved), 1);
+    if (observed.empty() || reinterpret_cast<uint8_t**>(RelTarget(observed[0] + 3, observed[0] + 7)) != gameState) {
+        error = "ReadAndExecuteEffect does not get the local country as expected";
+        return false;
+    }
+    *effectCommand = out.effectCommand;
+    *readExecute = out.readExecuteEffect;
+    return true;
+}
+
+// CLogEffect::ExecuteActual and CLogTrigger::ActualEvaluate, compiled alike but for their text:
+//   +99 mov ecx,[rdi+text+0x20] (its size)  +106 lea rax,[rdi+text+0x10]
+constexpr char kLogScript[] =
+    "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? "
+    "48 8B DA 48 8B F9 45 33 FF 44 89 BD ?? ?? ?? ?? 48 8D 8D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8D 8D ?? ?? ?? ?? "
+    "E8 ?? ?? ?? ?? 48 89 9D ?? ?? ?? ?? 44 89 BD ?? ?? ?? ?? 48 89 9D ?? ?? ?? ?? 8B 8F ?? ?? ?? ?? 48 8D 87 ?? ?? ?? ?? 48 83";
+constexpr size_t kLogScriptStolenBytes = 15;
 // Whether code at `begin` calls `target` within `size` bytes (any E8 byte that decodes to it).
 inline bool CallsWithin(const Image& img, const uint8_t* begin, size_t size, const uint8_t* target) {
     for (const Section& s : img.code) {
@@ -1059,358 +1232,7 @@ inline uint8_t* FindWithin(uint8_t* begin, size_t size, const char* what, const 
     return hits.empty() ? nullptr : hits[0];
 }
 
-inline bool LocateModifierDocs(const Image& img, ModifierDocsLocations& out, std::string& error) {
-    uint8_t* p = FindOne(img, "CModifier::LogDefinitions", kLogDefinitions, error);
-    if (!p) return false;
-    const uint8_t* heading = RelTarget(p + 92, p + 96);
-    size_t n = sizeof(kLogDefinitionsHeading) - 1;
-    bool found = false;
-    for (const Section& section : img.data) {
-        if (heading >= section.begin && heading + n <= section.end) found = memcmp(heading, kLogDefinitionsHeading, n) == 0;
-    }
-    if (!found) {
-        error = "CModifier::LogDefinitions: its first text isn't the documentation's heading";
-        return false;
-    }
-    out.logDefinitions = p;
-    return true;
-}
-
-inline bool LocateCrtHeap(const Image& img, CrtHeapLocations& out, std::string& error) {
-    struct Fn {
-        const char* what;
-        const char* pattern;
-        uint8_t** at;
-    } fns[] = {
-        {"_malloc_base", kCrtMalloc, &out.malloc},  {"_calloc_base", kCrtCalloc, &out.calloc},
-        {"_realloc_base", kCrtRealloc, &out.realloc}, {"_free_base", kCrtFree, &out.free},
-        {"_msize_base", kCrtMsize, &out.msize},
-    };
-    const Pattern heapLoad = Parse("48 8B 0D");
-    for (Fn& fn : fns) {
-        if (!(*fn.at = FindOne(img, fn.what, fn.pattern, error))) return false;
-        // The pattern ends past the heap load, so its first 48 8B 0D is inside the match.
-        auto load = FindAll(*fn.at, *fn.at + Parse(fn.pattern).size(), heapLoad, 1);
-        auto heap = reinterpret_cast<HANDLE*>(RelTarget(load[0] + 3, load[0] + 7));
-        if (out.heap && heap != out.heap) {
-            error = std::string(fn.what) + " uses a different heap handle";
-            return false;
-        }
-        out.heap = heap;
-    }
-    if (RelTarget(out.realloc + 25, out.realloc + 29) != out.malloc ||
-        RelTarget(out.realloc + 37, out.realloc + 41) != out.free) {
-        error = "_realloc_base does not call the _malloc_base/_free_base found";
-        return false;
-    }
-    return true;
-}
-
-// --- The AI fixes ---------------------------------------------------------------------------
-
-inline bool LocateBuildPlan(const Image& img, AiFixLocations& out, std::string& error) {
-    uint8_t* p = FindOne(img, "BuildAndUpgradeDistrictsAndBuildings", kPlanWalk, error);
-    if (!p) return false;
-    out.planWalk = p;
-    out.ministerStrategy = static_cast<size_t>(Disp32(p + 44));
-    size_t count = p[76];
-    uint8_t* array = FindWithin(p, kPlanWalkSearch, "the build plan walk's array", kPlanWalkArray, error);
-    if (!array) return false;
-    out.planArray = array[10];
-    uint8_t* end = FindWithin(p, kPlanWalkSearch, "the build plan walk's Clear call", kPlanWalkClear, error);
-    if (!end) return false;
-    out.planClearCall = end + 14;
-    out.planClear = RelTarget(end + 15, end + 19);
-    if (!MatchAt(out.planClear, Parse(kPlanClear))) {
-        error = "the build plan's Clear: unexpected code";
-        return false;
-    }
-    out.arrayCount = out.planClear[13];
-    out.arrayData = out.planClear[35];
-    out.nullBuildable = reinterpret_cast<uint8_t**>(RelTarget(out.planClear + 43, out.planClear + 47));
-    // The check reads the same strategy and count; the array walked is the one cleared.
-    if (static_cast<size_t>(Disp32(p + 69)) != out.ministerStrategy ||
-        static_cast<size_t>(Disp32(array + 3)) != out.ministerStrategy || count != out.planArray + out.arrayCount ||
-        array[15] != end[13] || out.arrayCount != 0x14 || out.arrayData != 8) {
-        error = "the build plan walk: its reads of the plan don't agree";
-        return false;
-    }
-    uint8_t* check = FindOne(img, "the build plan's item check", kPlanItemCheck, error);
-    if (!check) return false;
-    out.resolveColony = RelTarget(check + 10, check + 14);
-    out.colonyCheckObject = check[20];
-    out.colonyCheckSlot = check[27];
-    out.hasQueued = RelTarget(check + 40, check + 44);
-    if (!CallsWithin(img, p, kPlanWalkSearch, out.resolveColony)) {
-        error = "the build plan walk doesn't call the ResolveColony found";
-        return false;
-    }
-    return true;
-}
-
-inline bool LocateOpportunist(const Image& img, AiFixLocations& out, std::string& error) {
-    uint8_t* p = FindOne(img, "IsReadyForWarWith's opportunist pass", kOpportunistPass, error);
-    if (!p) return false;
-    out.opportunist = p;
-    out.targetSlot = static_cast<size_t>(Disp32(p + 3));
-    out.countryWarCount = static_cast<size_t>(Disp32(p + 10));
-    out.opportunistJoin = RelTarget(p + 17, p + 21);
-    out.countryPersonality = static_cast<size_t>(Disp32(p + 24));
-    out.personalityOpportunist = p[30];
-    out.countryId = p[56];
-    out.warDb = reinterpret_cast<uint8_t**>(RelTarget(p + 66, p + 70));
-    out.countryWars = static_cast<size_t>(Disp32(p + 82));
-    out.warId = p[125];
-    size_t attackersCount = static_cast<size_t>(Disp32(p + 143));
-    size_t attackersData = static_cast<size_t>(Disp32(p + 157));
-    out.memberId = p[164];
-    out.memberStride = p[178];
-    out.warAttackers = static_cast<size_t>(Disp32(p + 192));
-    out.warDefenders = static_cast<size_t>(Disp32(p + 200));
-    size_t sideCount = p[208], sideData = p[228];
-    out.countryPower = static_cast<size_t>(Disp32(p + 279));
-    if (RelTarget(p + 34, p + 38) != out.opportunistJoin ||
-        static_cast<size_t>(Disp32(p + 41)) != out.countryWarCount || attackersData != out.warAttackers + sideData ||
-        attackersCount != out.warAttackers + sideCount || p[233] != out.memberId || p[270] != out.countryId ||
-        sideData != 8 || sideCount != 0x14) {
-        error = "IsReadyForWarWith's opportunist pass: its offsets don't agree";
-        return false;
-    }
-    auto globals = FindAll(p - kOpportunistGlobalsSearch, p, Parse(kOpportunistGlobals), 2);
-    if (globals.size() != 1 || static_cast<size_t>(Disp32(globals[0] + 3)) != out.countryWarCount) {
-        error = "IsReadyForWarWith: the first pass's globals not found";
-        return false;
-    }
-    out.countryDb = reinterpret_cast<uint8_t**>(RelTarget(globals[0] + 10, globals[0] + 14));
-    out.nullCountry = reinterpret_cast<uint8_t**>(RelTarget(globals[0] + 17, globals[0] + 21));
-    out.nullWar = reinterpret_cast<uint8_t**>(RelTarget(globals[0] + 24, globals[0] + 28));
-    const uint8_t* join = out.opportunistJoin - 12;
-    if (!MatchAt(join, Parse(kOpportunistJoin)) || static_cast<size_t>(Disp32(join + 8)) != out.targetSlot) {
-        error = "IsReadyForWarWith: the passes' join is not where expected";
-        return false;
-    }
-    return true;
-}
-
-inline bool LocateWarDistance(const Image& img, AiFixLocations& out, std::string& error) {
-    uint8_t* p = FindOne(img, "CalcGoingToWarScoreAgainst's distance malus", kWarDistance, error);
-    if (!p) return false;
-    out.warDistance = p + kWarDistanceAt;
-    out.malusDistance = reinterpret_cast<int32_t*>(RelTarget(p + 15, p + 19));
-    out.malusSkip = p + 21 + static_cast<int8_t>(p[20]);
-    out.malus = reinterpret_cast<int64_t*>(RelTarget(p + 28, p + 32));
-    return true;
-}
-
-inline bool LocateTruce(const Image& img, AiFixLocations& out, std::string& error) {
-    uint8_t* p = FindOne(img, "PrepareWar's truce division", kTruceDivide, error);
-    if (!p) return false;
-    out.boxedInMult = reinterpret_cast<int32_t*>(RelTarget(p + 3, p + 7));
-    out.truceOperand = p + 43;
-    if (reinterpret_cast<int32_t*>(RelTarget(p + 43, p + 47)) != out.boxedInMult) {
-        error = "PrepareWar: the truce divides by something other than the boxed-in multiplier";
-        return false;
-    }
-    return true;
-}
-
-inline bool LocateExpansionRefresh(const Image& img, AiFixLocations& out, std::string& error) {
-    uint8_t* p = FindOne(img, "CreateStrategicData's colonize data check", kExpansionRefresh, error);
-    if (!p) return false;
-    // The month check's jz and the year check's jl go to the same place: the rebuild.
-    if (p + 36 + static_cast<int8_t>(p[35]) != p + 62 + static_cast<int8_t>(p[61])) {
-        error = "CreateStrategicData: the month and year checks jump to different places";
-        return false;
-    }
-    out.expansionYears = p + 60;
-    return true;
-}
-
-inline bool LocateAiSchedule(const Image& img, AiFixLocations& out, std::string& error) {
-    uint8_t* c = FindOne(img, "CAICore::Update's day counters", kAiCounters, error);
-    if (!c) return false;
-    out.weekCounter = static_cast<size_t>(Disp32(c + 5));
-    out.monthCounter = static_cast<size_t>(Disp32(c + 39));
-    out.yearCounter = static_cast<size_t>(Disp32(c + 73));
-    const size_t uses[3][2] = {{11, 29}, {45, 63}, {79, 97}};
-    const size_t fields[3] = {out.weekCounter, out.monthCounter, out.yearCounter};
-    for (int i = 0; i < 3; ++i) {
-        if (static_cast<size_t>(Disp32(c + uses[i][0])) != fields[i] ||
-            static_cast<size_t>(Disp32(c + uses[i][1])) != fields[i]) {
-            error = "CAICore::Update: a counter is read and reset at different offsets";
-            return false;
-        }
-    }
-    auto starts = FindAll(c - kAiUpdateSearch, c, Parse(kAiUpdatePrologue), 4);
-    if (starts.size() != 1) {
-        error = "CAICore::Update: prologue not found";
-        return false;
-    }
-    out.aiUpdate = starts[0];
-    uint8_t* init = FindOne(img, "CAICore::CAICore's counters", kAiCoreInit, error);
-    if (!init) return false;
-    out.coreId = static_cast<size_t>(Disp32(init + 2));
-    out.randomPosition = static_cast<size_t>(Disp32(init + 8));
-    out.randomSeed = static_cast<size_t>(Disp32(init + 14));
-    if (static_cast<size_t>(Disp32(init + 21)) != out.coreId ||
-        static_cast<size_t>(Disp32(init + 61)) != out.weekCounter) {
-        error = "CAICore::CAICore: its fields don't agree with Update's";
-        return false;
-    }
-    return true;
-}
-
-inline bool LocateSavedRandom(const Image& img, AiFixLocations& out, std::string& error) {
-    auto hits = FindInCode(img, kSavedRandom, 3);
-    if (hits.size() != 2) {
-        error = "CCountryAI::ReadMember's saved random checks: not found";
-        return false;
-    }
-    uint8_t* a = hits[0];
-    uint8_t* b = hits[1];
-    // One flag, one local, one exit; the two stores 4 bytes apart (position, then seed).
-    if (RelTarget(a + 2, a + 6) != RelTarget(b + 2, b + 6) || a[14] != b[14] ||
-        RelTarget(a + 8, a + 12) != RelTarget(b + 8, b + 12) ||
-        static_cast<int8_t>(b[17]) - static_cast<int8_t>(a[17]) != 4) {
-        error = "CCountryAI::ReadMember's saved random checks don't agree";
-        return false;
-    }
-    out.useSavedRandom = RelTarget(a + 2, a + 6);
-    out.savedRandomJumps[0] = a + 6;
-    out.savedRandomJumps[1] = b + 6;
-    return true;
-}
-
-// True if `fn` is the fleet name function: `this += k; call BuildString`.
-inline bool IsFleetNameThunk(const StringLocations& str, const uint8_t* fn) {
-    Pattern pat = Parse(kFleetNameThunk);
-    if (!MatchAt(fn, pat)) return false;
-    return RelTarget(fn + pat.size(), fn + pat.size() + 4) == str.buildString;
-}
-
-// ---- Script storage (README, "Script storage") ----
-
-// Saving and loading, so the save store follows the save.
-struct SaveLocations {
-    uint8_t* startSave = nullptr;  // CSaveGameTaskManager::StartSaveToPath(manager, const CString& path, bool, bool, bool) -> 0 when started (hooked)
-    uint8_t* load = nullptr;       // CGameState::Load(state, CFile*, const CString& path) (hooked)
-    uint8_t* newGame = nullptr;    // CGameState::OnNewGameStarted(state) (hooked)
-    uint8_t* readingSave = nullptr;  // &g_bIsReadingSaveFile, which Load sets
-};
-
-// CSaveGameTaskManager::StartSaveToPath: the prologue (15 bytes of spills taken), then
-//   +41 movzx r12d,r8b  +44 mov r13,rcx  +60 lea r14,[rdx+10h] and cmp qword [r14+18h],10h: the path
-//   is a CString (buffer at +0x10, capacity at +0x28)
-constexpr char kStartSaveToPath[] =
-    "48 89 5C 24 10 44 88 4C 24 20 44 88 44 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
-    "48 81 EC ?? ?? ?? ?? 45 0F B6 E0 4C 8B E9 45 33 FF 44 89 BD ?? ?? ?? ?? 4C 8D 72 10 49 8B D6 49 83 7E 18 10 "
-    "72 03 49 8B 16";
-constexpr size_t kStartSaveToPathStolenBytes = 15;
-// CGameState::Load(state, CFile*, const CString& path): the prologue (15 bytes of spills taken), then
-//   +39 mov r12,r8 (the path)  +56 lea rax,[g_bIsReadingSaveFile]  +67 movzx eax,byte [it]  +77 mov byte [it],1
-constexpr char kGameStateLoad[] =
-    "48 89 5C 24 08 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
-    "48 81 EC ?? ?? ?? ?? 4D 8B E0 48 8B F2 4C 8B F9 33 D2 89 95 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 45 ?? "
-    "0F B6 05 ?? ?? ?? ?? 88 45 ?? C6 05 ?? ?? ?? ?? 01";
-constexpr size_t kGameStateLoadStolenBytes = 15;
-// CGameState::OnNewGameStarted: the prologue (15 bytes of spills taken), then
-//   +42 movzx ebx,byte [g_AllowGetPlayer]  +55 mov byte [g_AllowGetPlayer],0  +62 call
-constexpr char kNewGameStarted[] =
-    "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
-    "48 81 EC ?? ?? ?? ?? 4C 8B F1 0F B6 1D ?? ?? ?? ?? 88 9D ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 00 E8";
-constexpr size_t kNewGameStartedStolenBytes = 15;
-
-constexpr char kEffectCommand[] =
-    "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
-    "48 81 EC ?? ?? ?? ?? 4C 8B F2 48 8B F9 45 33 ED 41 8B DD 89 5C 24 30 48 39 1D ?? ?? ?? ?? 75 ?? "
-    "44 89 6C 24 58 4C 89 6C 24 60 48 C7 45 80 0F 00 00 00 48 C7 44 24 78 0D 00 00 00 F2 0F 10 0D";
-constexpr size_t kEffectCommandSearch = 0x290;  // it calls ReadAndExecuteEffect within this many bytes
-constexpr char kReadAndExecuteEffect[] =
-    "48 89 5C 24 08 48 89 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? "
-    "48 81 EC ?? ?? ?? ?? 4C 8B F1";
-// Inside it: +0 mov rcx,[rip+g_CurrentGameState]  +7 call CGameState::GetLocalObserved  +12 mov rsi,rax
-constexpr char kCallLocalObserved[] = "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B F0";
-constexpr size_t kReadAndExecuteEffectSearch = 0x100;
-constexpr size_t kReadAndExecuteEffectStringSearch = 0x1000;
-
-// CLogEffect::ExecuteActual and CLogTrigger::ActualEvaluate, compiled alike but for their text:
-//   +99 mov ecx,[rdi+text+0x20] (its size)  +106 lea rax,[rdi+text+0x10]
-constexpr char kLogScript[] =
-    "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? "
-    "48 8B DA 48 8B F9 45 33 FF 44 89 BD ?? ?? ?? ?? 48 8D 8D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 8D 8D ?? ?? ?? ?? "
-    "E8 ?? ?? ?? ?? 48 89 9D ?? ?? ?? ?? 44 89 BD ?? ?? ?? ?? 48 89 9D ?? ?? ?? ?? 8B 8F ?? ?? ?? ?? 48 8D 87 ?? ?? ?? ?? 48 83";
-constexpr size_t kLogScriptStolenBytes = 15;
-
-// The console's `effect` command, OnExecute_Effect, and the ReadAndExecuteEffect it calls; `gameState` is
-// TickLocations::gameState. Script storage runs stored text through it.
-inline bool LocateEffectCommand(const Image& img, uint8_t** gameState, uint8_t** effectCommand, uint8_t** readExecute,
-                                std::string& error) {
-    struct Found {
-        uint8_t* effectCommand = nullptr;
-        uint8_t* readExecuteEffect = nullptr;
-    } out;
-    // The console's `trigger` command is compiled to the same bytes up to its call, so the call tells them apart.
-    Pattern runner = Parse(kReadAndExecuteEffect);
-    uint8_t* run = nullptr;
-    for (uint8_t* command : FindInCode(img, kEffectCommand)) {
-        for (uint8_t* p = command; p < command + kEffectCommandSearch; ++p) {
-            if (*p != 0xE8) continue;
-            uint8_t* target = RelTarget(p + 1, p + 5);  // not always a call: the byte may be part of another instruction
-            bool inCode = false;
-            for (const Section& s : img.code) {
-                inCode = inCode || (target >= s.begin && target + kReadAndExecuteEffectStringSearch <= s.end);
-            }
-            if (!inCode || !MatchAt(target, runner)) continue;
-            if (run) {
-                error = "OnExecute_Effect: more than one match";
-                return false;
-            }
-            run = target;
-            out.effectCommand = command;
-            out.readExecuteEffect = target;
-            break;
-        }
-    }
-    if (!run) {
-        error = "OnExecute_Effect: not found";
-        return false;
-    }
-    static const char kExecuting[] = "Executing effect script.";
-    bool executes = false;
-    for (uint8_t* p = run; p < run + kReadAndExecuteEffectStringSearch && !executes; ++p) {
-        const uint8_t* text = RelTarget(p, p + 4);
-        for (const Section& s : img.data) {
-            if (text >= s.begin && text + sizeof(kExecuting) <= s.end &&
-                memcmp(text, kExecuting, sizeof(kExecuting) - 1) == 0) {
-                executes = true;
-            }
-        }
-    }
-    if (!executes) {
-        error = "ReadAndExecuteEffect does not use its message";
-        return false;
-    }
-    if (reinterpret_cast<uint8_t**>(RelTarget(out.effectCommand + 58, out.effectCommand + 62)) != gameState) {
-        error = "OnExecute_Effect checks a different game state";
-        return false;
-    }
-    const char* noGameState = reinterpret_cast<const char*>(RelTarget(out.effectCommand + 95, out.effectCommand + 99));
-    if (memcmp(noGameState, "No game state", 13) != 0) {
-        error = "OnExecute_Effect's message is not the one expected";
-        return false;
-    }
-    auto observed = FindAll(run, run + kReadAndExecuteEffectSearch, Parse(kCallLocalObserved), 1);
-    if (observed.empty() || reinterpret_cast<uint8_t**>(RelTarget(observed[0] + 3, observed[0] + 7)) != gameState) {
-        error = "ReadAndExecuteEffect does not get the local country as expected";
-        return false;
-    }
-    *effectCommand = out.effectCommand;
-    *readExecute = out.readExecuteEffect;
-    return true;
-}
-
-// `allowGetPlayer`, if known, is the flag OnNewGameStarted must clear; null: it must clear one flag.
-inline bool LocateSaves(const Image& img, const uint8_t* allowGetPlayer, SaveLocations& out, std::string& error) {
+inline bool LocateSaves(const Image& img, SaveLocations& out, std::string& error) {
     out.startSave = FindOne(img, "CSaveGameTaskManager::StartSaveToPath", kStartSaveToPath, error);
     if (!out.startSave) return false;
     out.load = FindOne(img, "CGameState::Load", kGameStateLoad, error);
@@ -1425,12 +1247,14 @@ inline bool LocateSaves(const Image& img, const uint8_t* allowGetPlayer, SaveLoc
     if (!out.newGame) return false;
     p = out.newGame;
     const uint8_t* flag = RelTarget(p + 45, p + 49);
-    if ((allowGetPlayer && flag != allowGetPlayer) || RelTarget(p + 57, p + 62) != flag) {
+    if (RelTarget(p + 57, p + 62) != flag) {
         error = "CGameState::OnNewGameStarted: it doesn't clear g_AllowGetPlayer";
         return false;
     }
     return true;
 }
+
+// ---- Script storage (re/script_storage.md) ----
 
 struct SaveWriteLocations {
     uint8_t* zipAndWrite = nullptr;
@@ -1665,6 +1489,305 @@ inline bool LocateMultiplayer(const Image& img, MultiplayerLocations& out, std::
     out.session = reinterpret_cast<uint8_t**>(RelTarget(p + 3, p + 7));
     out.flag = static_cast<size_t>(Disp32(p + 14));
     return true;
+}
+
+inline bool LocateModifierDocs(const Image& img, ModifierDocsLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "CModifier::LogDefinitions", kLogDefinitions, error);
+    if (!p) return false;
+    const uint8_t* heading = RelTarget(p + 92, p + 96);
+    size_t n = sizeof(kLogDefinitionsHeading) - 1;
+    bool found = false;
+    for (const Section& section : img.data) {
+        if (heading >= section.begin && heading + n <= section.end) found = memcmp(heading, kLogDefinitionsHeading, n) == 0;
+    }
+    if (!found) {
+        error = "CModifier::LogDefinitions: its first text isn't the documentation's heading";
+        return false;
+    }
+    out.logDefinitions = p;
+    return true;
+}
+
+inline bool LocateCrtHeap(const Image& img, CrtHeapLocations& out, std::string& error) {
+    struct Fn {
+        const char* what;
+        const char* pattern;
+        uint8_t** at;
+    } fns[] = {
+        {"_malloc_base", kCrtMalloc, &out.malloc},  {"_calloc_base", kCrtCalloc, &out.calloc},
+        {"_realloc_base", kCrtRealloc, &out.realloc}, {"_free_base", kCrtFree, &out.free},
+        {"_msize_base", kCrtMsize, &out.msize},
+    };
+    const Pattern heapLoad = Parse("48 8B 0D");
+    for (Fn& fn : fns) {
+        if (!(*fn.at = FindOne(img, fn.what, fn.pattern, error))) return false;
+        // The pattern ends past the heap load, so its first 48 8B 0D is inside the match.
+        auto load = FindAll(*fn.at, *fn.at + Parse(fn.pattern).size(), heapLoad, 1);
+        auto heap = reinterpret_cast<HANDLE*>(RelTarget(load[0] + 3, load[0] + 7));
+        if (out.heap && heap != out.heap) {
+            error = std::string(fn.what) + " uses a different heap handle";
+            return false;
+        }
+        out.heap = heap;
+    }
+    if (RelTarget(out.realloc + 25, out.realloc + 29) != out.malloc ||
+        RelTarget(out.realloc + 37, out.realloc + 41) != out.free) {
+        error = "_realloc_base does not call the _malloc_base/_free_base found";
+        return false;
+    }
+    return true;
+}
+
+// --- The AI fixes ---------------------------------------------------------------------------
+
+inline bool LocateBuildPlan(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "BuildAndUpgradeDistrictsAndBuildings", kPlanWalk, error);
+    if (!p) return false;
+    out.planWalk = p;
+    out.ministerStrategy = static_cast<size_t>(Disp32(p + 44));
+    size_t count = p[76];
+    uint8_t* array = FindWithin(p, kPlanWalkSearch, "the build plan walk's array", kPlanWalkArray, error);
+    if (!array) return false;
+    out.planArray = array[10];
+    uint8_t* end = FindWithin(p, kPlanWalkSearch, "the build plan walk's Clear call", kPlanWalkClear, error);
+    if (!end) return false;
+    out.planClearCall = end + 14;
+    out.planClear = RelTarget(end + 15, end + 19);
+    if (!MatchAt(out.planClear, Parse(kPlanClear))) {
+        error = "the build plan's Clear: unexpected code";
+        return false;
+    }
+    out.arrayCount = out.planClear[13];
+    out.arrayData = out.planClear[35];
+    out.nullBuildable = reinterpret_cast<uint8_t**>(RelTarget(out.planClear + 43, out.planClear + 47));
+    // The check reads the same strategy and count; the array walked is the one cleared.
+    if (static_cast<size_t>(Disp32(p + 69)) != out.ministerStrategy ||
+        static_cast<size_t>(Disp32(array + 3)) != out.ministerStrategy || count != out.planArray + out.arrayCount ||
+        array[15] != end[13] || out.arrayCount != 0x14 || out.arrayData != 8) {
+        error = "the build plan walk: its reads of the plan don't agree";
+        return false;
+    }
+    uint8_t* check = FindOne(img, "the build plan's item check", kPlanItemCheck, error);
+    if (!check) return false;
+    out.resolveColony = RelTarget(check + 10, check + 14);
+    out.colonyCheckObject = check[20];
+    out.colonyCheckSlot = check[27];
+    out.hasQueued = RelTarget(check + 40, check + 44);
+    if (!CallsWithin(img, p, kPlanWalkSearch, out.resolveColony)) {
+        error = "the build plan walk doesn't call the ResolveColony found";
+        return false;
+    }
+    return true;
+}
+
+// 2.16; needs LocateBuildPlan's results.
+inline bool LocatePlanSkip(const Image& img, AiFixLocations& out, std::string& error) {
+    if (!out.planWalk && !LocateBuildPlan(img, out, error)) return false;
+    uint8_t* call = FindWithin(out.planWalk, kPlanWalkSearch, "the build plan walk's item check call", kPlanWalkCheckCall, error);
+    if (!call) return false;
+    uint8_t* cont = FindWithin(out.planWalk, kPlanWalkSearch, "the build plan walk's continue", kPlanWalkContinue, error);
+    if (!cont) return false;
+    // The call is of the function LocateBuildPlan's check pattern lies in; a failed check goes to
+    // the `mov rcx,[rsp+X]` before the Clear call; the continue reloads that same slot.
+    std::string ignored;
+    uint8_t* check = FindOne(img, "the build plan's item check", kPlanItemCheck, ignored);
+    uint8_t* target = RelTarget(call + 8, call + 12);
+    if (!check || target > check || check - target > 0x80 || RelTarget(call + 16, call + 20) != out.planClearCall - 5 ||
+        cont[4] != out.planClearCall[-1] || cont < call) {
+        error = "the build plan walk: its item check and loop don't agree";
+        return false;
+    }
+    out.planStopJump = call + 14;
+    out.planContinue = cont;
+    return true;
+}
+
+inline bool LocateColonizerIdle(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "BuildColonizer's idle ship count", kColonizerIdle, error);
+    if (!p) return false;
+    out.colonizerIdle = p + 30;
+    out.colonizerShipCount = static_cast<size_t>(Disp32(p + 32));
+    return true;
+}
+
+inline bool LocateStationRange(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "BuildStation", kBuildStation, error);
+    if (!p) return false;
+    uint8_t* outpost = FindOne(img, "FindPlanetForStarbase's distance penalty", kPenaltyLoadOutpost, error);
+    if (!outpost) return false;
+    uint8_t* station = FindOne(img, "FindDepositHolderForOrbitalStation's distance penalty", kPenaltyLoadStation, error);
+    if (!station) return false;
+    outpost += 27;
+    station += 10;
+    uint8_t* define = RelTarget(outpost + 3, outpost + 7);
+    if (define != RelTarget(station + 3, station + 7)) {
+        error = "the station searches read different distance penalties";
+        return false;
+    }
+    // BuildStation calls both searches: a call that lands shortly before each load.
+    bool callsOutpost = false, callsStation = false;
+    for (uint8_t* c = p; c < p + kBuildStationSearch; ++c) {
+        if (*c != 0xE8) continue;
+        uint8_t* t = RelTarget(c + 1, c + 5);
+        if (t < outpost && outpost - t < static_cast<ptrdiff_t>(kStationSearchSize)) callsOutpost = true;
+        if (t < station && station - t < static_cast<ptrdiff_t>(kStationSearchSize)) callsStation = true;
+    }
+    if (!callsOutpost || !callsStation) {
+        error = "BuildStation doesn't call the searches found";
+        return false;
+    }
+    out.buildStation = p;
+    out.penaltyLoadOutpost = outpost;
+    out.penaltyLoadStation = station;
+    out.stationPenalty = reinterpret_cast<int64_t*>(define);
+    return true;
+}
+
+inline bool LocateSurveyBlacklist(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "MonthlyUpdate's survey blacklist clear", kSurveyBlacklistClear, error);
+    if (!p) return false;
+    out.blacklistJump = p + 34;
+    return true;
+}
+
+inline bool LocateOpportunist(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "IsReadyForWarWith's opportunist pass", kOpportunistPass, error);
+    if (!p) return false;
+    out.opportunist = p;
+    out.targetSlot = static_cast<size_t>(Disp32(p + 3));
+    out.countryWarCount = static_cast<size_t>(Disp32(p + 10));
+    out.opportunistJoin = RelTarget(p + 17, p + 21);
+    out.countryPersonality = static_cast<size_t>(Disp32(p + 24));
+    out.personalityOpportunist = p[30];
+    out.countryId = p[56];
+    out.warDb = reinterpret_cast<uint8_t**>(RelTarget(p + 66, p + 70));
+    out.countryWars = static_cast<size_t>(Disp32(p + 82));
+    out.warId = p[125];
+    size_t attackersCount = static_cast<size_t>(Disp32(p + 143));
+    size_t attackersData = static_cast<size_t>(Disp32(p + 157));
+    out.memberId = p[164];
+    out.memberStride = p[178];
+    out.warAttackers = static_cast<size_t>(Disp32(p + 192));
+    out.warDefenders = static_cast<size_t>(Disp32(p + 200));
+    size_t sideCount = p[208], sideData = p[228];
+    out.countryPower = static_cast<size_t>(Disp32(p + 279));
+    if (RelTarget(p + 34, p + 38) != out.opportunistJoin ||
+        static_cast<size_t>(Disp32(p + 41)) != out.countryWarCount || attackersData != out.warAttackers + sideData ||
+        attackersCount != out.warAttackers + sideCount || p[233] != out.memberId || p[270] != out.countryId ||
+        sideData != 8 || sideCount != 0x14) {
+        error = "IsReadyForWarWith's opportunist pass: its offsets don't agree";
+        return false;
+    }
+    auto globals = FindAll(p - kOpportunistGlobalsSearch, p, Parse(kOpportunistGlobals), 2);
+    if (globals.size() != 1 || static_cast<size_t>(Disp32(globals[0] + 3)) != out.countryWarCount) {
+        error = "IsReadyForWarWith: the first pass's globals not found";
+        return false;
+    }
+    out.countryDb = reinterpret_cast<uint8_t**>(RelTarget(globals[0] + 10, globals[0] + 14));
+    out.nullCountry = reinterpret_cast<uint8_t**>(RelTarget(globals[0] + 17, globals[0] + 21));
+    out.nullWar = reinterpret_cast<uint8_t**>(RelTarget(globals[0] + 24, globals[0] + 28));
+    const uint8_t* join = out.opportunistJoin - 12;
+    if (!MatchAt(join, Parse(kOpportunistJoin)) || static_cast<size_t>(Disp32(join + 8)) != out.targetSlot) {
+        error = "IsReadyForWarWith: the passes' join is not where expected";
+        return false;
+    }
+    return true;
+}
+
+inline bool LocateWarDistance(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "CalcGoingToWarScoreAgainst's distance malus", kWarDistance, error);
+    if (!p) return false;
+    out.warDistance = p + kWarDistanceAt;
+    out.malusDistance = reinterpret_cast<int32_t*>(RelTarget(p + 15, p + 19));
+    out.malusSkip = p + 21 + static_cast<int8_t>(p[20]);
+    out.malus = reinterpret_cast<int64_t*>(RelTarget(p + 28, p + 32));
+    return true;
+}
+
+inline bool LocateTruce(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "PrepareWar's truce division", kTruceDivide, error);
+    if (!p) return false;
+    out.boxedInMult = reinterpret_cast<int32_t*>(RelTarget(p + 3, p + 7));
+    out.truceOperand = p + 43;
+    if (reinterpret_cast<int32_t*>(RelTarget(p + 43, p + 47)) != out.boxedInMult) {
+        error = "PrepareWar: the truce divides by something other than the boxed-in multiplier";
+        return false;
+    }
+    return true;
+}
+
+inline bool LocateExpansionRefresh(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* p = FindOne(img, "CreateStrategicData's colonize data check", kExpansionRefresh, error);
+    if (!p) return false;
+    // The month check's jz and the year check's jl go to the same place: the rebuild.
+    if (p + 36 + static_cast<int8_t>(p[35]) != p + 62 + static_cast<int8_t>(p[61])) {
+        error = "CreateStrategicData: the month and year checks jump to different places";
+        return false;
+    }
+    out.expansionYears = p + 60;
+    return true;
+}
+
+inline bool LocateAiSchedule(const Image& img, AiFixLocations& out, std::string& error) {
+    uint8_t* c = FindOne(img, "CAICore::Update's day counters", kAiCounters, error);
+    if (!c) return false;
+    out.weekCounter = static_cast<size_t>(Disp32(c + 5));
+    out.monthCounter = static_cast<size_t>(Disp32(c + 39));
+    out.yearCounter = static_cast<size_t>(Disp32(c + 73));
+    const size_t uses[3][2] = {{11, 29}, {45, 63}, {79, 97}};
+    const size_t fields[3] = {out.weekCounter, out.monthCounter, out.yearCounter};
+    for (int i = 0; i < 3; ++i) {
+        if (static_cast<size_t>(Disp32(c + uses[i][0])) != fields[i] ||
+            static_cast<size_t>(Disp32(c + uses[i][1])) != fields[i]) {
+            error = "CAICore::Update: a counter is read and reset at different offsets";
+            return false;
+        }
+    }
+    auto starts = FindAll(c - kAiUpdateSearch, c, Parse(kAiUpdatePrologue), 4);
+    if (starts.size() != 1) {
+        error = "CAICore::Update: prologue not found";
+        return false;
+    }
+    out.aiUpdate = starts[0];
+    uint8_t* init = FindOne(img, "CAICore::CAICore's counters", kAiCoreInit, error);
+    if (!init) return false;
+    out.coreId = static_cast<size_t>(Disp32(init + 2));
+    out.randomPosition = static_cast<size_t>(Disp32(init + 8));
+    out.randomSeed = static_cast<size_t>(Disp32(init + 14));
+    if (static_cast<size_t>(Disp32(init + 21)) != out.coreId ||
+        static_cast<size_t>(Disp32(init + 61)) != out.weekCounter) {
+        error = "CAICore::CAICore: its fields don't agree with Update's";
+        return false;
+    }
+    return true;
+}
+
+inline bool LocateSavedRandom(const Image& img, AiFixLocations& out, std::string& error) {
+    auto hits = FindInCode(img, kSavedRandom, 3);
+    if (hits.size() != 2) {
+        error = "CCountryAI::ReadMember's saved random checks: not found";
+        return false;
+    }
+    uint8_t* a = hits[0];
+    uint8_t* b = hits[1];
+    // One flag, one local, one exit; the two stores 4 bytes apart (position, then seed).
+    if (RelTarget(a + 2, a + 6) != RelTarget(b + 2, b + 6) || a[14] != b[14] ||
+        RelTarget(a + 8, a + 12) != RelTarget(b + 8, b + 12) ||
+        static_cast<int8_t>(b[17]) - static_cast<int8_t>(a[17]) != 4) {
+        error = "CCountryAI::ReadMember's saved random checks don't agree";
+        return false;
+    }
+    out.useSavedRandom = RelTarget(a + 2, a + 6);
+    out.savedRandomJumps[0] = a + 6;
+    out.savedRandomJumps[1] = b + 6;
+    return true;
+}
+
+// True if `fn` is the fleet name function: `this += k; call BuildString`.
+inline bool IsFleetNameThunk(const StringLocations& str, const uint8_t* fn) {
+    Pattern pat = Parse(kFleetNameThunk);
+    if (!MatchAt(fn, pat)) return false;
+    return RelTarget(fn + pat.size(), fn + pat.size() + 4) == str.buildString;
 }
 
 }  // namespace locate

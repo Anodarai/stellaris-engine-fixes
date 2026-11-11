@@ -7,12 +7,16 @@
 
 static std::string g_text;
 
-static void TestLog(const char* fmt, ...) {
+static void TestLog(LogLevel level, const char* component, const char* fmt, ...) {
     char buf[1024];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
+    g_text += LogLevelName(level);
+    g_text += ' ';
+    g_text += component;
+    g_text += " | ";
     g_text += buf;
     g_text += '\n';
 }
@@ -26,7 +30,7 @@ extern "C" __declspec(dllexport) unsigned long long AllocTestForeign() {
 }
 extern "C" __declspec(dllexport) const char* AllocTestSummary() {
     static std::string s;
-    s = alloc::Summary();
+    s = alloc::Stats();
     return s.c_str();
 }
 

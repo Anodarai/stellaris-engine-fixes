@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <random>
 #include <cstdio>
@@ -12,6 +13,7 @@ std::vector<Effect> effects;
 bool __fastcall Valid(uint8_t* p){return p[8]!=0;}
 bool __fastcall Available(uint8_t* p){return p[8]!=0;}
 void __fastcall Read(uint8_t* economy,void* table,int){memcpy(resourceledger::Values(table),*reinterpret_cast<void**>(economy+0x30),32);}
+void __fastcall FaultingRead(uint8_t*,void*,int){RaiseException(0xE0534546,0,0,nullptr);}
 void __fastcall Write(uint8_t* economy,void* table,int flag){memcpy(*reinterpret_cast<void**>(economy+0x30),resourceledger::Values(table),32);Set(economy,0x38,flag);}
 void __fastcall Clamp(uint8_t*,void*){}
 void __fastcall Situation(uint8_t*,uint8_t*,uint8_t* resource,int64_t amount,void* updates){
@@ -84,5 +86,56 @@ int main(int argc,char** argv){
     converter[8]=0;fixed.fill(INT64_MAX);amounts.fill(1);bool started=false;resourceledger::Batch(l,economy.data(),&input,false,0,nullptr,started);Check(fixed[0]==INT64_MAX,"batch addition saturates");
     converter[8]=1;for(auto p:pointers)p[8]=1;fixed.fill(-100);amounts.fill(INT64_MIN);started=false;
     resourceledger::Batch(l,economy.data(),&input,true,0,nullptr,started);Check(fixed[0]==INT64_MAX-99,"batch removes full negative minimum");
+    // A resource without a slot in the table is skipped and counted, never written through (the
+    // game's own code would write through it).
+    converter[8]=1;for(auto p:pointers)p[8]=1;fixed.fill(1000);amounts.fill(5);Set(pointers[2],l.resourceIndex,9);
+    uint64_t skippedBefore=resourceledger::skipped.load();effects.clear();started=false;
+    resourceledger::Batch(l,economy.data(),&input,false,0,nullptr,started);
+    Check(fixed==std::array<int64_t,4>{1005,1005,1000,1005} && resourceledger::skipped.load()==skippedBefore+1,
+          "batch skips an entry outside the table and applies the rest");
+    Check(effects.size()==3 && std::none_of(effects.begin(),effects.end(),[](const Effect& e){return e.index==9;}),
+          "no situation update for the skipped entry");
+    fixed.fill(1000);effects.clear();resourceledger::ChangeProgress skippedChange{};
+    resourceledger::Change(l,economy.data(),pointers[2],5,false,skippedChange);
+    Check(skippedChange.skipped && !skippedChange.effectsStarted && effects.empty() &&
+          fixed==std::array<int64_t,4>{1000,1000,1000,1000} && resourceledger::skipped.load()==skippedBefore+2,
+          "a single change outside the table is skipped");
+    Set(pointers[2],l.resourceIndex,2);
+    // A fault inside Batch: from then on the game's own batch runs only when every entry has a slot
+    // in the table (the hook returns false); a batch with one that doesn't is skipped whole.
+    using Values4=std::array<int64_t,4>;const Values4 untouched{1000,1000,1000,1000};
+    numericpatch::Context fallback{};
+    fallback.rcx=reinterpret_cast<uintptr_t>(economy.data());fallback.rdx=reinterpret_cast<uintptr_t>(&input);
+    converter[8]=1;fixed.fill(1000);amounts.fill(5);effects.clear();
+    economyVT[18]=reinterpret_cast<void*>(&FaultingRead);
+    Check(!resourceledger::BatchHook(fallback,&l) && l.batchChecksOnly && fixed==untouched && effects.empty(),
+          "a fault before any effect hands the batch to the game");
+    economyVT[18]=reinterpret_cast<void*>(&Read);
+    uint64_t batchesBefore=resourceledger::skippedBatches.load();skippedBefore=resourceledger::skipped.load();
+    Check(!resourceledger::BatchHook(fallback,&l) && !resourceledger::RemoveBatchHook(fallback,&l) &&
+          fixed==untouched && effects.empty() && resourceledger::skipped.load()==skippedBefore,
+          "after a fault, a batch inside the table goes to the game unchanged");
+    Set(pointers[2],l.resourceIndex,9);
+    Check(resourceledger::RemoveBatchHook(fallback,&l) && fixed==untouched && effects.empty() &&
+          resourceledger::skipped.load()==skippedBefore+1 && resourceledger::skippedBatches.load()==batchesBefore+1,
+          "after a fault, a batch with an entry outside the table is skipped whole");
+    converter[8]=0;
+    Check(!resourceledger::BatchHook(fallback,&l) && resourceledger::skippedBatches.load()==batchesBefore+1,
+          "without conversion the game's batch writes only table slots, so it runs");
+    Set(pointers[2],l.resourceIndex,2);
+    resourceledger::Table shorter(amounts.data(),3,nullptr);
+    fallback.rdx=reinterpret_cast<uintptr_t>(&shorter);
+    Check(resourceledger::BatchHook(fallback,&l) && resourceledger::skipped.load()==skippedBefore+2 &&
+          resourceledger::skippedBatches.load()==batchesBefore+2,
+          "without conversion a shorter input is skipped: the game would read past its end");
+    converter[8]=1;
+    Check(!resourceledger::BatchHook(fallback,&l) && resourceledger::skippedBatches.load()==batchesBefore+2,
+          "with conversion the game reads only the input's entries, so a shorter input runs");
+    uint8_t* registrySaved=registryPointer;registryPointer=reinterpret_cast<uint8_t*>(uintptr_t(0x10));
+    Check(resourceledger::BatchHook(fallback,&l) && resourceledger::skippedBatches.load()==batchesBefore+3,
+          "a fault while checking skips the batch");
+    registryPointer=registrySaved;
+    Check(fixed==untouched && effects.empty(),"the checks change nothing");
+    l.batchChecksOnly=false;
     VirtualFree(code,0,MEM_RELEASE);FreeLibrary(mod);printf("resource batches: 20000 native fixtures and extreme signed changes; %d failures\n",failures);return failures?1:0;
 }

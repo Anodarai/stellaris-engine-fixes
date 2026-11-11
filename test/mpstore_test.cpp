@@ -73,8 +73,22 @@ int main(int argc, char** argv) {
               !mpstore::ReadSnapshot(snapshot.substr(0, snapshot.size() - 1), g2, s2, error) &&
               !mpstore::ReadSnapshot(snapshot + "x", g2, s2, error) && g2.Empty() && s2.Empty(),
           "a text that is not a snapshot is refused and leaves the stores empty");
-    Check(!mpstore::ReadSnapshot("sef-snapshot-1 5 0\nx = 1\n", g2, s2, error) && g2.Empty(),
+    Check(!mpstore::ReadSnapshot("sef-snapshot-2 0 5 0\nx = 1\n", g2, s2, error) && g2.Empty(),
           "a damaged store is refused");
+    uint64_t answers = 0;
+    Check(mpstore::ReadSnapshot(mpstore::MakeSnapshot(global, save, 18446744073709551615ull), g2, s2, error, &answers) &&
+              answers == 18446744073709551615ull && g2.Values() == global.Values(),
+          "the snapshot names the resync request it answers");
+    Check(!mpstore::ReadSnapshot("sef-snapshot-1 0 0\n", g2, s2, error) && !mpstore::ReadSnapshot("sef-snapshot-2 0 0\n", g2, s2, error) &&
+              !mpstore::ReadSnapshot("sef-snapshot-2 x 0 0\n", g2, s2, error),
+          "a snapshot of the previous version or without its request id is refused");
+    uint64_t id = 0;
+    Check(mpstore::ParseResync(mpstore::ResyncMessage(42), &id) && id == 42 &&
+              !mpstore::ParseResync(std::string(mpstore::kResyncPrefix), &id) &&
+              !mpstore::ParseResync(std::string(mpstore::kResyncPrefix) + "4x", &id) &&
+              !mpstore::ParseResync(std::string(mpstore::kResyncPrefix) + "-1", &id) &&
+              !mpstore::ParseResync("@sef-store-1:resync", &id),
+          "resync requests carry a plain decimal id");
 
     // Messages.
     size_t count = 0;
@@ -86,9 +100,10 @@ int main(int argc, char** argv) {
     Check(RoundTrip(std::string(mpstore::kChunkBytes, 'a'), &count) && count == 1, "a text of exactly one piece");
     Check(RoundTrip(std::string(mpstore::kMaxSnapshot, 'z'), &count), "the largest snapshot survives");
     Check(mpstore::MakeMessages(std::string(mpstore::kMaxSnapshot + 1, 'z')).empty(), "oversize snapshot is not sent");
-    Check(!mpstore::ReadSnapshot("sef-snapshot-1 +0 0\n", g2, s2, error) &&
-              !mpstore::ReadSnapshot("sef-snapshot-1 18446744073709551616 0\n", g2, s2, error),
-          "snapshot sizes reject signs and overflow");
+    Check(!mpstore::ReadSnapshot("sef-snapshot-2 0 +0 0\n", g2, s2, error) &&
+              !mpstore::ReadSnapshot("sef-snapshot-2 0 18446744073709551616 0\n", g2, s2, error) &&
+              !mpstore::ReadSnapshot("sef-snapshot-2 18446744073709551616 0 0\n", g2, s2, error),
+          "snapshot sizes and ids reject signs and overflow");
 
     std::vector<std::string> m = mpstore::MakeMessages(big);
     Assembler a;
@@ -113,9 +128,9 @@ int main(int argc, char** argv) {
     Check(a.Feed(m2[0] + std::string(mpstore::kMaxMessage, 'A'), &out, &error) == Assembler::Result::Bad,
           "a message that is too long is dropped");
     Check(a.Feed(m2[0], &out, &error) == Assembler::Result::Complete && out == snapshot, "and the assembler works afterwards");
-    for (const char* bad : {"@sef-store-1:1:0:1:", "@sef-store-1:00000000:+0:1:",
-                           "@sef-store-1:00000000:0:18446744073709551617:",
-                           "@sef-store-1:00000000:0:0:", "@sef-store-1:00000000:0:2:YQ=="}) {
+    for (const char* bad : {"@sef-store-2:1:0:1:", "@sef-store-2:00000000:+0:1:",
+                           "@sef-store-2:00000000:0:18446744073709551617:",
+                           "@sef-store-2:00000000:0:0:", "@sef-store-2:00000000:0:2:YQ=="}) {
         Check(a.Feed(bad, &out, &error) == Assembler::Result::Bad, "malformed numeric heading or short chunk refused");
     }
     Check(a.Feed(m2[0] + std::string("\0ignored", 8), &out, &error) == Assembler::Result::Bad,

@@ -14,6 +14,15 @@ struct Locations {
     uint8_t* armedConflict;
     int32_t systemFleetArray;
     int32_t aiFlags;
+    // Field offsets, each read from an instruction of the functions above (AGENTS.md: struct
+    // offsets change between builds). A military group starts with its target, which is the
+    // object `wanted` gets, so the target's fields are the group's.
+    size_t groupTarget, groupSystem, groupMission, groupFleetCount, groupCountry;
+    size_t availableCount;              // the available-fleet list's count
+    size_t systemId, countryId;         // a galactic object's and a country's own id
+    size_t ministerModule, moduleAiSlot, aiStrategiesSlot;  // minister -> module -> AI -> lists
+    uint32_t hostileList;               // the strategy list the hostile fleets go in (14)
+    size_t strategiesEntries, strategiesCount, entryTarget;
 };
 
 constexpr size_t kScanStolen = 15;
@@ -75,9 +84,48 @@ inline bool Locate(const locate::Image& image, Locations& out) {
         locate::RelTarget(collect + 27, collect + 31) != country) return false;
     const auto arrayOffset = locate::Disp32(fleetArray + 3);
     if (locate::Disp32(fleetArray + 10) != arrayOffset + 12) return false;
+
+    // AddFleet (r13 the group) resolves the group's system, country and target fleet in turn:
+    // mov reg,[r13+field], the database, the TPdxRef lookup, then cmp [object+id],reg.
+    const auto groupSystem = inside(add, 0x800,
+        "41 8B 45 ?? 4C 8B 05 ?? ?? ?? ?? 4D 85 C0 74 ?? 8B C8 81 E1 FF FF FF 00 41 3B 48 20 73 ?? "
+        "8B D1 48 03 D2 49 8B 48 18 48 8B 7C D1 08 48 85 FF 74 ?? 39 47 ??");
+    const auto groupCountry = inside(add, 0x800,
+        "45 8B 45 ?? 41 8B C0 25 FF FF FF 00 3B 42 20 73 ?? 8B C8 48 03 C9 48 8B 42 18 48 8B 54 C8 08 "
+        "48 85 D2 74 ?? 44 39 42 ??");
+    const auto groupTarget = inside(add, 0x800,
+        "41 8B 45 ?? 4C 8B 05 ?? ?? ?? ?? 4D 85 C0 74 ?? 8B C8 81 E1 FF FF FF 00 41 3B 48 20 73 ?? "
+        "8B D1 48 03 D2 49 8B 48 18 48 8B 4C D1 08 48 85 C9 74 ?? 39 41 ??");
+    const auto groupFleets = inside(add, 0x800, "49 63 7D ?? 49 8B 75 ??");
+    // GetWantedPower reads its target's system the same way (rdi the target).
+    const auto targetSystem = inside(wanted, 0x600,
+        "8B 47 ?? 4C 8B 05 ?? ?? ?? ?? 4D 85 C0 74 ?? 8B C8 81 E1 FF FF FF 00 41 3B 48 20");
+    // The hostile strategy list's walk: entries = [list+8], entry = entries[i], its target [entry+8].
+    const auto strategyLoop = inside(strategyReader, 0x80, "49 8B 4D ?? 48 8B 15 ?? ?? ?? ?? 48 8B 2C F1 8B 5D ??");
+    if (!groupSystem || !groupCountry || !groupTarget || !groupFleets || !targetSystem || !strategyLoop) return false;
+    const auto systemDb = locate::RelTarget(groupSystem + 7, groupSystem + 11);
+    const auto fleetDb = locate::RelTarget(groupTarget + 7, groupTarget + 11);
+    if (locate::RelTarget(targetSystem + 6, targetSystem + 10) != systemDb || targetSystem[2] != groupSystem[3] ||
+        locate::RelTarget(strategyLoop + 7, strategyLoop + 11) != fleetDb || fleetDb == systemDb) return false;
+
     out = {scan, collect, wanted, assign, add, country,
            locate::RelTarget(conflictCall + 13, conflictCall + 17), arrayOffset,
            locate::Disp32(conflictCall + 24)};
+    out.groupTarget = groupTarget[3];
+    out.groupSystem = groupSystem[3];
+    out.groupMission = assign[71];          // mov r8d,[r9+mission] before GetWantedPower
+    out.groupFleetCount = groupFleets[3];
+    out.groupCountry = groupCountry[3];
+    out.availableCount = assign[56];        // cmp [r8+count],esi at the start
+    out.systemId = groupSystem[51];
+    out.countryId = groupCountry[39];
+    out.ministerModule = strategyReader[3];
+    out.moduleAiSlot = strategyReader[9];
+    out.aiStrategiesSlot = strategyReader[43];
+    out.hostileList = static_cast<uint32_t>(locate::Disp32(strategyReader + 25));
+    out.strategiesEntries = strategyLoop[3];
+    out.strategiesCount = strategyReader[50];
+    out.entryTarget = strategyLoop[17];
     return true;
 }
 

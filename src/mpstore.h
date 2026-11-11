@@ -36,12 +36,26 @@
 
 namespace mpstore {
 
-constexpr char kPrefix[] = "@sef-store-1:";
-constexpr char kDisabled[] = "@sef-store-1:disabled";
-// Posted by the host when a running game goes to a player. Where it executes, every machine stops
-// storage, and the host takes its snapshot and posts it: taken at that ordered boundary, the
-// snapshot holds every write made before it, and nothing is written until its last piece arrives.
-constexpr char kResync[] = "@sef-store-1:resync";
+// Version 2: resync requests carry an id and a snapshot names the request it answers. Raise
+// mpchecksum::kStorageProtocol along with it, so that other versions cannot share a game.
+constexpr char kPrefix[] = "@sef-store-2:";
+constexpr char kDisabled[] = "@sef-store-2:disabled";
+// "@sef-store-2:resync:<id>", posted by the host when a running game goes to a player, ids rising
+// in the order the host posts them. Where it executes, every machine stops storage and the host
+// takes its snapshot and posts it: taken at that ordered boundary, the snapshot holds every write
+// made before it, and nothing is written until it arrives. A snapshot reopens storage only if no
+// later request has executed: with two joins in flight, the first snapshot would otherwise reopen
+// storage and the second, taken before those writes, would then undo them on every machine.
+// Every machine sees every request that executes after its own game state was taken, so all of
+// them agree on the latest one when a snapshot completes.
+constexpr char kResyncPrefix[] = "@sef-store-2:resync:";
+inline std::string ResyncMessage(uint64_t id) { return kResyncPrefix + std::to_string(id); }
+inline bool ParseResync(const std::string& text, uint64_t* id) {
+    constexpr size_t n = sizeof(kResyncPrefix) - 1;
+    if (text.size() <= n || text.compare(0, n, kResyncPrefix) != 0) return false;
+    auto r = std::from_chars(text.data() + n, text.data() + text.size(), *id);
+    return r.ec == std::errc{} && r.ptr == text.data() + text.size();
+}
 constexpr size_t kChunkBytes = 2400;            // of the snapshot in one chat command, before base64
 constexpr size_t kMaxSnapshot = 1024 * 1024;    // a larger one is not sent: storage stays off in that game
 constexpr size_t kMaxMessage = 4096;            // a longer chat text is not ours
@@ -107,36 +121,42 @@ inline bool Base64Decode(const std::string& in, std::string* out) {
 }
 
 // ---- The snapshot: both stores as one text ----
-// "sef-snapshot-1 <bytes of the global store> <bytes of the save store>\n", then the two stores
-// as pdxstore::Serialize writes them.
+// "sef-snapshot-2 <id of the resync request it answers> <bytes of the global store> <bytes of the
+// save store>\n", then the two stores as pdxstore::Serialize writes them. A snapshot that answers
+// no request (the lobby's) carries the id of the latest request the host has posted.
 
-inline std::string MakeSnapshot(const pdxstore::Store& global, const pdxstore::Store& save) {
+inline std::string MakeSnapshot(const pdxstore::Store& global, const pdxstore::Store& save, uint64_t answers = 0) {
     std::string g = pdxstore::Serialize(global), s = pdxstore::Serialize(save);
-    return "sef-snapshot-1 " + std::to_string(g.size()) + " " + std::to_string(s.size()) + "\n" + g + s;
+    return "sef-snapshot-2 " + std::to_string(answers) + " " + std::to_string(g.size()) + " " +
+           std::to_string(s.size()) + "\n" + g + s;
 }
 
 // False and `error` when the text isn't a snapshot; the stores are then empty.
-inline bool ReadSnapshot(const std::string& text, pdxstore::Store& global, pdxstore::Store& save, std::string& error) {
+inline bool ReadSnapshot(const std::string& text, pdxstore::Store& global, pdxstore::Store& save, std::string& error,
+                         uint64_t* answers = nullptr) {
     global.Clear();
     save.Clear();
     global.SetClean();
     save.SetClean();
     size_t eol = text.find('\n');
     error.clear();
-    constexpr char heading[] = "sef-snapshot-1 ";
+    constexpr char heading[] = "sef-snapshot-2 ";
+    uint64_t id = 0;
     size_t g = 0, s = 0;
-    size_t split = text.find(' ', sizeof(heading) - 1);
-    auto number = [&](size_t begin, size_t end, size_t& value) {
+    size_t first = text.find(' ', sizeof(heading) - 1);
+    size_t second = first == std::string::npos ? first : text.find(' ', first + 1);
+    auto number = [&](size_t begin, size_t end, auto& value) {
         if (begin >= end || end > text.size()) return false;
         auto r = std::from_chars(text.data() + begin, text.data() + end, value);
         return r.ec == std::errc{} && r.ptr == text.data() + end;
     };
-    if (text.size() > kMaxSnapshot || eol == std::string::npos || eol > 64 ||
-        text.compare(0, sizeof(heading) - 1, heading) != 0 || split >= eol ||
-        !number(sizeof(heading) - 1, split, g) || !number(split + 1, eol, s)) {
+    if (text.size() > kMaxSnapshot || eol == std::string::npos || eol > 80 ||
+        text.compare(0, sizeof(heading) - 1, heading) != 0 || first >= eol || second >= eol ||
+        !number(sizeof(heading) - 1, first, id) || !number(first + 1, second, g) || !number(second + 1, eol, s)) {
         error = "no snapshot heading";
         return false;
     }
+    if (answers) *answers = id;
     size_t body = text.size() - eol - 1;
     if (g > body || s != body - g) {
         error = "the sizes in the heading don't match the text";

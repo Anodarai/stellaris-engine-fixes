@@ -83,8 +83,14 @@ inline bool Locate(const locate::Image& image,Locations& l,std::string& error) {
     // Audited direct-call inventory: five numeric callers plus the yellow wrapper;
     // eight yellow callers. Refuse to widen an ABI if the inventory changes.
     size_t direct=0,yellow=0;
-    for(const auto& section:image.code) for(auto p=section.begin;p+5<=section.end;++p) if(*p==0xe8) {
-        auto target=Call(p);direct+=target==l.format;yellow+=target==l.yellow;
+    // memchr finds each E8 byte, as locate::FindAll does: this scan covers all of the code.
+    for(const auto& section:image.code) {
+        if(section.end-section.begin<5) continue;
+        const uint8_t* last=section.end-5;
+        for(auto p=static_cast<const uint8_t*>(memchr(section.begin,0xe8,last-section.begin+1));p;
+            p=p<last?static_cast<const uint8_t*>(memchr(p+1,0xe8,last-p)):nullptr) {
+            auto target=Call(const_cast<uint8_t*>(p));direct+=target==l.format;yellow+=target==l.yellow;
+        }
     }
     if(direct!=6 || yellow!=8) {error="military formatter caller inventory changed";return false;}
     for(size_t i=0;i<6;++i) {

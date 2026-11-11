@@ -62,8 +62,11 @@ int main(int argc, char** argv) {
     mpchecksum::AddScriptStorage(true, false, storage);
     Check(mpchecksum::Fingerprint(storage).empty(), "disabled multiplayer storage does not change the checksum");
     mpchecksum::AddScriptStorage(true, true, storage);
-    Check(mpchecksum::Fingerprint(storage) == "sef-rules-1;script_storage.multiplayer=1",
-          "enabled multiplayer storage changes the checksum");
+    Check(mpchecksum::Fingerprint(storage) == "sef-rules-1;script_storage.multiplayer=2",
+          "enabled multiplayer storage changes the checksum, naming the storage protocol");
+    // The previous DLL wrote "=1" (snapshot taken in StartSend, no resync ids): it must not match.
+    Check(mpchecksum::Fingerprint(storage) != mpchecksum::Fingerprint({{"script_storage", "multiplayer", "1"}}),
+          "storage protocol 1 and 2 give different checksums");
 
     if (argc > 1) {
         bool expectKnown = argc > 2 && strcmp(argv[2], "--expect-known") == 0;

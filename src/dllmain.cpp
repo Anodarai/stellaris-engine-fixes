@@ -134,15 +134,7 @@ void MaybeLogSummary();
 uintptr_t g_base = 0;
 locate::StringLocations g_str;
 
-// TPdxRef lookup: the object for `id` in database `db`, or nullptr if it is gone.
-uint8_t* ResolveRef(uint8_t* db, uint32_t id, size_t idOffset) {
-    uint32_t idx = id & 0xFFFFFF;
-    if (!db || idx >= *reinterpret_cast<uint32_t*>(db + game::kDbCountOffset)) return nullptr;
-    uint8_t* entries = *reinterpret_cast<uint8_t**>(db + game::kDbEntriesOffset);
-    uint8_t* obj = *reinterpret_cast<uint8_t**>(entries + 8 + static_cast<size_t>(idx) * 0x10);
-    if (!obj || *reinterpret_cast<uint32_t*>(obj + idOffset) != id) return nullptr;
-    return obj;
-}
+using game::ResolveRef;
 
 // Copies a game string into `out` and frees it. Returns the length copied.
 int TakeString(game::String& s, char* out, size_t outSize) {
@@ -2105,6 +2097,59 @@ bool WriteCode(uint8_t* at, const void* bytes, size_t n) {
     return true;
 }
 
+// Numeric blocks (numericpatch.h) that go in together. Prepare writes every block's stub and
+// changes no game code; Write puts in every entry jump and, if one fails, takes back those it
+// wrote; Restore takes back all it wrote. A feature installs its other hooks between the two.
+class BlockInstall {
+public:
+    void Add(numericpatch::Block& block) { blocks.push_back(&block); }
+    template <class Range> void AddAll(Range& range) { for (auto& block : range) Add(block); }
+    bool Prepare() {
+        jumps.assign(blocks.size(), {});
+        originals.assign(blocks.size(), {});
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            numericpatch::Block& b = *blocks[i];
+            uint8_t* stub = AllocNear(b.at, kStubSize);
+            if (!stub || !numericpatch::Prepare(b, stub, kStubSize, jumps[i])) return false;
+            originals[i].assign(b.at, b.at + b.stolen);
+        }
+        return true;
+    }
+    bool Write() {
+        for (written = 0; written < blocks.size(); ++written) {
+            if (!WriteCode(blocks[written]->at, jumps[written].data(), jumps[written].size())) {
+                Restore();
+                return false;
+            }
+        }
+        return true;
+    }
+    void Restore() {
+        for (; written > 0; --written) {
+            WriteCode(blocks[written - 1]->at, originals[written - 1].data(), originals[written - 1].size());
+        }
+    }
+
+private:
+    static constexpr size_t kStubSize = 1024;
+    std::vector<numericpatch::Block*> blocks;
+    std::vector<std::vector<uint8_t>> jumps, originals;
+    size_t written = 0;
+};
+
+// Prepares and writes `install`, saying for `component` what failed; true once it is in.
+bool InstallBlocks(BlockInstall& install, const char* component) {
+    if (!install.Prepare()) {
+        Log(LogLevel::Error, component, "cannot prepare stubs; off");
+        return false;
+    }
+    if (!install.Write()) {
+        Log(LogLevel::Error, component, "installation failed; off");
+        return false;
+    }
+    return true;
+}
+
 // Keep AddResource's whole-unit quotient in int64 (issue #3; re/numeric_overflow.md).
 void InstallResourceRounding(HMODULE self, const locate::Image& img) {
     std::string ini = IniPath(self);
@@ -2297,30 +2342,58 @@ int LedgerFault(const char* operation, EXCEPTION_POINTERS* fault, const resource
         record.NumberParameters > 0 ? static_cast<unsigned long long>(record.ExceptionInformation[0]) : 0,
         record.NumberParameters > 1 ? reinterpret_cast<void*>(record.ExceptionInformation[1]) : nullptr,
         economy, converter, table, resource, static_cast<long long>(amount), int(progress.effectsStarted));
-    Log(LogLevel::Error, "stockpile", "single-resource hooks off from next call (no replay after side effects)");
+    Log(LogLevel::Error, "stockpile", "wide single-resource arithmetic off from next call; native fallback requires a valid slot");
     return EXCEPTION_EXECUTE_HANDLER;
 }
+// A change for a resource without a slot in the stockpile table is skipped, not handed to the
+// game, whose code would write through that slot (resourceledger::skipped). The first is logged.
+std::atomic<bool> g_ledgerSkipLogged{false};
+void LedgerSkipped(const char* operation,const uint8_t* resource,int64_t amount) {
+    if(g_ledgerSkipLogged.exchange(true)) return;
+    int index=-1;if(resource)ReadInt(resource+g_resourceLedger.resourceIndex,&index);
+    Log(LogLevel::Error, "stockpile", "%s skipped: resource %p has no verified table entry (slot %d, amount %lld); "
+        "later skips are only counted", operation, resource, index, static_cast<long long>(amount));
+}
+
+bool LedgerCanReplay(const char* operation,const uint8_t* resource,int64_t amount,void* conversionTable=nullptr) {
+    __try {
+        int count=conversionTable ? resourceledger::Count(conversionTable) : resourceledger::StockpileCount(g_resourceLedger);
+        if(resource && resourceledger::InTable(g_resourceLedger,resource,count)) return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    resourceledger::skipped.fetch_add(1,std::memory_order_relaxed);
+    LedgerSkipped(operation,resource,amount);
+    return false;
+}
+
 void __fastcall LedgerAdd(uint8_t* economy,uint8_t* resource,int64_t amount) {
     resourceledger::ChangeProgress progress{};
     if(!g_ledgerFailed.load()) {
-        __try { if (resourceledger::Change(g_resourceLedger,economy,resource,amount,false,progress)) return; }
+        bool done=false;
+        __try { resourceledger::Change(g_resourceLedger,economy,resource,amount,false,progress); done=true; }
         __except(LedgerFault("add",GetExceptionInformation(),progress,economy,nullptr,nullptr,resource,amount)) {}
+        if(done) { if(progress.skipped) LedgerSkipped("add",resource,amount); return; }
     }
-    if(!progress.effectsStarted) g_ledgerOriginalAdd(economy,resource,amount);
+    if(!progress.effectsStarted && LedgerCanReplay("add",resource,amount)) g_ledgerOriginalAdd(economy,resource,amount);
 }
 void __fastcall LedgerRemove(uint8_t* economy,uint8_t* resource,int64_t amount) {
     resourceledger::ChangeProgress progress{};
     if(!g_ledgerFailed.load()) {
-        __try { if (resourceledger::Change(g_resourceLedger,economy,resource,amount,true,progress)) return; }
+        bool done=false;
+        __try { resourceledger::Change(g_resourceLedger,economy,resource,amount,true,progress); done=true; }
         __except(LedgerFault("remove",GetExceptionInformation(),progress,economy,nullptr,nullptr,resource,amount)) {}
+        if(done) { if(progress.skipped) LedgerSkipped("remove",resource,amount); return; }
     }
-    if(!progress.effectsStarted) g_ledgerOriginalRemove(economy,resource,amount);
+    if(!progress.effectsStarted && LedgerCanReplay("remove",resource,amount)) g_ledgerOriginalRemove(economy,resource,amount);
 }
-// False, with nothing changed, when the resource's slot is outside the table (left to the game).
-bool LedgerConvertCopy(uint8_t* converter,void* table,uint8_t* resource,int64_t amount,resourceledger::ChangeProgress& progress) {
+void LedgerConvertCopy(uint8_t* converter,void* table,uint8_t* resource,int64_t amount,resourceledger::ChangeProgress& progress) {
     progress.stage = "copy conversion table";
     int count=resourceledger::Count(table);
-    if(!resourceledger::InTable(g_resourceLedger,resource,count)) return false;
+    if(!resourceledger::InTable(g_resourceLedger,resource,count)) {
+        progress.stage = "resource outside the conversion table; skipped";
+        progress.skipped = true;
+        resourceledger::skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     int64_t* destination=resourceledger::Values(table);
     std::vector<int64_t> values(destination,destination+count);
     resourceledger::Table copy(values.data(),count,g_resourceLedger.allocatorVtable);
@@ -2329,15 +2402,17 @@ bool LedgerConvertCopy(uint8_t* converter,void* table,uint8_t* resource,int64_t 
     progress.stage = "write conversion table";
     progress.effectsStarted = true;
     memcpy(destination,values.data(),size_t(count)*sizeof(int64_t));
-    return true;
 }
 void __fastcall LedgerConvert(uint8_t* converter,void* table,uint8_t* resource,int64_t amount) {
     resourceledger::ChangeProgress progress{};
     if(!g_ledgerFailed.load()) {
-        __try { if (LedgerConvertCopy(converter,table,resource,amount,progress)) return; }
+        bool done=false;
+        __try { LedgerConvertCopy(converter,table,resource,amount,progress); done=true; }
         __except(LedgerFault("convert",GetExceptionInformation(),progress,nullptr,converter,table,resource,amount)) {}
+        if(done) { if(progress.skipped) LedgerSkipped("conversion",resource,amount); return; }
     }
-    if(!progress.effectsStarted) g_ledgerOriginalConvert(converter,table,resource,amount);
+    if(!progress.effectsStarted && table && LedgerCanReplay("conversion",resource,amount,table))
+        g_ledgerOriginalConvert(converter,table,resource,amount);
 }
 void InstallResourceLedger(HMODULE self,const locate::Image& img) {
     auto ini=IniPath(self);
@@ -2346,10 +2421,8 @@ void InstallResourceLedger(HMODULE self,const locate::Image& img) {
     }
     std::string error;
     if(!resourceledger::Locate(img,g_resourceLedger,error)) { Log(LogLevel::Error, "stockpile", "%s; off",error.c_str());return; }
-    std::vector<uint8_t> batchJumps[2],batchOriginals[2];
-    for(int i=0;i<2;++i){auto& b=g_resourceLedger.batches[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,batchJumps[i])){Log(LogLevel::Error, "stockpile", "cannot prepare batch hooks; off");return;}
-        batchOriginals[i].assign(b.at,b.at+b.stolen);}
+    BlockInstall batches;batches.AddAll(g_resourceLedger.batches);
+    if(!batches.Prepare()){Log(LogLevel::Error, "stockpile", "cannot prepare batch hooks; off");return;}
     uint8_t* sites[]={g_resourceLedger.add,g_resourceLedger.remove,g_resourceLedger.convert};
     void* hooks[]={reinterpret_cast<void*>(&LedgerAdd),reinterpret_cast<void*>(&LedgerRemove),reinterpret_cast<void*>(&LedgerConvert)};
     uint8_t* originals[3]{};
@@ -2364,8 +2437,7 @@ void InstallResourceLedger(HMODULE self,const locate::Image& img) {
         if(i==1) g_ledgerOriginalRemove=reinterpret_cast<resourceledger::ChangeFn>(originals[i]);
         if(i==2) g_ledgerOriginalConvert=reinterpret_cast<resourceledger::ConvertFn>(originals[i]);
     }
-    for(int i=0;i<2;++i)if(!WriteCode(g_resourceLedger.batches[i].at,batchJumps[i].data(),batchJumps[i].size())){
-        for(int j=0;j<i;++j)WriteCode(g_resourceLedger.batches[j].at,batchOriginals[j].data(),batchOriginals[j].size());
+    if(!batches.Write()){
         for(int j=0;j<3;++j)WriteCode(sites[j],originals[j],resourceledger::kStolen);
         Log(LogLevel::Error, "stockpile", "batch installation failed; off");return;}
     Log(LogLevel::Info, "stockpile", "checked single/batch add/remove/conversion; native capacity and situation handling retained");
@@ -2390,18 +2462,11 @@ void InstallNumericDisplay(HMODULE self,const locate::Image& img) {
     }
     std::string error;
     if(!numericdisplay::Locate(img,g_numericDisplay,error)) {Log(LogLevel::Error, "military_power_display", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[8],originals[8];
-    for(size_t i=0;i<8;++i) {
-        auto& b=g_numericDisplay.rounds[i];
-        auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])) {Log(LogLevel::Error, "military_power_display", "cannot prepare rounding stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);
-    }
-    size_t installed=0;
-    for(;installed<8;++installed) if(!WriteCode(g_numericDisplay.rounds[installed].at,jumps[installed].data(),jumps[installed].size())) break;
-    uint8_t* original=installed==8 ? InstallJumpHook(g_numericDisplay.format,15,reinterpret_cast<void*>(&MilitaryFormat64)) : nullptr;
+    BlockInstall rounds;rounds.AddAll(g_numericDisplay.rounds);
+    if(!rounds.Prepare()) {Log(LogLevel::Error, "military_power_display", "cannot prepare rounding stubs; off");return;}
+    uint8_t* original=rounds.Write() ? InstallJumpHook(g_numericDisplay.format,15,reinterpret_cast<void*>(&MilitaryFormat64)) : nullptr;
     if(!original) {
-        for(size_t i=0;i<installed;++i) WriteCode(g_numericDisplay.rounds[i].at,originals[i].data(),originals[i].size());
+        rounds.Restore();
         Log(LogLevel::Error, "military_power_display", "installation failed; off");return;
     }
     g_originalMilitaryFormat=reinterpret_cast<numericdisplay::FormatFn>(original);
@@ -2426,19 +2491,11 @@ void InstallDiplomacyArithmetic(HMODULE self,const locate::Image& img) {
     }
     std::string error;
     if(!diplomacyoverflow::Locate(img,g_diplomacyOverflow,error)) {Log(LogLevel::Error, "diplomatic_arithmetic", "%s; off",error.c_str());return;}
-    constexpr size_t count=diplomacyoverflow::kBlockCount;
-    std::vector<uint8_t> jumps[count],originals[count];
-    for(size_t i=0;i<count;++i) {
-        auto& b=g_diplomacyOverflow.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])) {Log(LogLevel::Error, "diplomatic_arithmetic", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);
-    }
+    BlockInstall blocks;blocks.AddAll(g_diplomacyOverflow.blocks);
+    if(!blocks.Prepare()) {Log(LogLevel::Error, "diplomatic_arithmetic", "cannot prepare stubs; off");return;}
     // Conversion is part of this feature: otherwise a wrapped input reaches the new products.
     if(!InstallFixedPointConversion(self,img,true)) {Log(LogLevel::Error, "diplomatic_arithmetic", "conversion prerequisite failed; off");return;}
-    size_t installed=0;
-    for(;installed<count;++installed) if(!WriteCode(g_diplomacyOverflow.blocks[installed].at,jumps[installed].data(),jumps[installed].size()))break;
-    if(installed!=count) {
-        for(size_t i=0;i<installed;++i)WriteCode(g_diplomacyOverflow.blocks[i].at,originals[i].data(),originals[i].size());
+    if(!blocks.Write()) {
         Log(LogLevel::Error, "diplomatic_arithmetic", "installation failed; off (fixed-point conversion remains enabled)");return;
     }
     g_diplomacyArithmeticInstalled=true;
@@ -2584,17 +2641,15 @@ void InstallDesignCache(HMODULE self,const locate::Image& img){
     if(!GetPrivateProfileIntA("numeric_fixes","fleet_stat_arithmetic",0,ini.c_str()) &&
        !GetPrivateProfileIntA("numeric_fixes","fleet_power_arithmetic",0,ini.c_str()))return;
     std::string error;if(!designcache::Locate(img,g_designCache,error)){Log(LogLevel::Error, "design_cache", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[6],originals[6];
-    for(int i=0;i<6;++i){auto& b=g_designCache.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "design_cache", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
+    BlockInstall blocks;blocks.AddAll(g_designCache.blocks);
+    if(!blocks.Prepare()){Log(LogLevel::Error, "design_cache", "cannot prepare stubs; off");return;}
     void* hooks[]={reinterpret_cast<void*>(&DesignCalcStats),reinterpret_cast<void*>(&DesignAddValue),reinterpret_cast<void*>(&DesignAddComponent),reinterpret_cast<void*>(&DesignRecalc),reinterpret_cast<void*>(&DesignAddModifiers),reinterpret_cast<void*>(&DesignGroupedSources)};
     const int entries[]={0,1,2,3,5,6};
     for(int i=0;i<6;++i){int entry=entries[i];auto original=InstallJumpHook(g_designCache.functions[entry],designcache::kStolen[entry],hooks[i]);
         if(!original){DisableDesignCache();for(int j=0;j<i;++j){int e=entries[j];WriteCode(g_designCache.functions[e],g_designCache.originals[e],designcache::kStolen[e]);}return;}
         g_designCache.originals[entry]=original;}
-    for(int i=0;i<6;++i)if(!WriteCode(g_designCache.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        DisableDesignCache();for(int j=0;j<i;++j)WriteCode(g_designCache.blocks[j].at,originals[j].data(),originals[j].size());
+    if(!blocks.Write()){
+        DisableDesignCache();
         for(int j:entries)WriteCode(g_designCache.functions[j],g_designCache.originals[j],designcache::kStolen[j]);return;}
     Log(LogLevel::Info, "design_cache", "wide rebuild-scoped stat terms, component totals and excess-power ratios");
 }
@@ -2654,13 +2709,8 @@ void InstallComponentDamage(HMODULE self,const locate::Image& img){
     if(!GetPrivateProfileIntA("numeric_fixes","fleet_stat_arithmetic",0,ini.c_str()) &&
        !GetPrivateProfileIntA("numeric_fixes","fleet_power_arithmetic",0,ini.c_str()))return;
     std::string error;if(!componentmath::Locate(img,g_componentMath,error)){Log(LogLevel::Error, "component_damage", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[2],originals[2];
-    for(int i=0;i<2;++i){auto& b=g_componentMath.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "component_damage", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(int i=0;i<2;++i)if(!WriteCode(g_componentMath.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(int j=0;j<i;++j)WriteCode(g_componentMath.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "component_damage", "cannot install; off");return;}
+    BlockInstall blocks;blocks.AddAll(g_componentMath.blocks);
+    if(!InstallBlocks(blocks,"component_damage"))return;
     Log(LogLevel::Info, "component_damage", "exact weapon/strike-craft damage, range means, counts and military weights");
 }
 std::atomic<bool> g_shipStatsFailed{false};
@@ -2705,9 +2755,8 @@ void InstallShipFormula(HMODULE self,const locate::Image& img){
     auto ini=IniPath(self);
     if(ini.empty() || !GetPrivateProfileIntA("numeric_fixes","fleet_power_arithmetic",0,ini.c_str()))return;
     std::string error;if(!shipformula::Locate(img,g_shipFormula,error)){Log(LogLevel::Error, "ship_power", "%s; off",error.c_str());return;}
-    auto& block=g_shipFormula.block;auto stub=AllocNear(block.at,1024);std::vector<uint8_t> jump;
-    if(!stub || !numericpatch::Prepare(block,stub,1024,jump) || !WriteCode(block.at,jump.data(),jump.size())){
-        Log(LogLevel::Error, "ship_power", "cannot install; off");return;}
+    BlockInstall blocks;blocks.Add(g_shipFormula.block);
+    if(!InstallBlocks(blocks,"ship_power"))return;
     Log(LogLevel::Info, "ship_power", "wide Q7 arithmetic; integer interval exponent fallback on native overflow");
 }
 incomelifetime::Locations g_incomeProduction;
@@ -2758,19 +2807,15 @@ void InstallIncomeProduction(HMODULE self,const locate::Image& image){
     auto ini=IniPath(self);if(ini.empty() || !GetPrivateProfileIntA("numeric_fixes","income_production_arithmetic",0,ini.c_str()))return;
     auto& l=g_incomeProduction;std::string error;
     if(!incomelifetime::Locate(image,l,error)){Log(LogLevel::Error, "income_production", "%s; off",error.c_str());return;}
-    std::vector<numericpatch::Block*> blocks;for(auto& b:l.producers.blocks)blocks.push_back(&b);for(auto& b:l.boundaries)blocks.push_back(&b);
-    std::vector<std::vector<uint8_t>> jumps(blocks.size()),originals(blocks.size());
-    for(size_t i=0;i<blocks.size();++i){auto& b=*blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "income_production", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
+    BlockInstall blocks;blocks.AddAll(l.producers.blocks);blocks.AddAll(l.boundaries);
+    if(!blocks.Prepare()){Log(LogLevel::Error, "income_production", "cannot prepare stubs; off");return;}
     uint8_t* entries[]={l.tables.roots[0],l.tables.roots[1],l.tables.drain,l.tables.categorizedDrain,l.tables.readResource};
     size_t stolen[]={14,18,14,14,14};
     void* hooks[]={reinterpret_cast<void*>(&IncomeProductionPass<0>),reinterpret_cast<void*>(&IncomeProductionPass<1>),
         reinterpret_cast<void*>(&IncomeProductionDrain<0>),reinterpret_cast<void*>(&IncomeProductionDrain<1>),reinterpret_cast<void*>(&IncomeProductionRead)};
     for(size_t i=0;i<5;++i){l.originals[i]=InstallJumpHook(entries[i],stolen[i],hooks[i]);
         if(!l.originals[i]){for(size_t j=0;j<i;++j)WriteCode(entries[j],l.originals[j],stolen[j]);Log(LogLevel::Error, "income_production", "entry installation failed; off");return;}}
-    for(size_t i=0;i<blocks.size();++i)if(!WriteCode(blocks[i]->at,jumps[i].data(),jumps[i].size())){
-        for(size_t j=0;j<i;++j)WriteCode(blocks[j]->at,originals[j].data(),originals[j].size());
+    if(!blocks.Write()){
         for(size_t j=0;j<5;++j)WriteCode(entries[j],l.originals[j],stolen[j]);Log(LogLevel::Error, "income_production", "atomic installation failed; off");return;}
     Log(LogLevel::Info, "income_production", "116 atomic additions, reads, stores, compare/subtract and drains within joined pass lifetimes");
 }
@@ -2779,13 +2824,8 @@ void InstallDiplomaticDisplay(HMODULE self,const locate::Image& image){
     if(!DiplomacyPartWanted(self,"diplomatic_display"))return;
     std::string error;if(!g_diplomacyOverflow.functions[0] || !g_diplomacyOverflow.functions[1] ||
         !diplodisplay::Locate(image,g_diploDisplay,error,g_diplomacyOverflow.functions)){Log(LogLevel::Error, "diplomatic_display", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[diplodisplay::kCount],originals[diplodisplay::kCount];
-    for(size_t i=0;i<diplodisplay::kCount;++i){auto& b=g_diploDisplay.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "diplomatic_display", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(size_t i=0;i<diplodisplay::kCount;++i)if(!WriteCode(g_diploDisplay.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(size_t j=0;j<i;++j)WriteCode(g_diploDisplay.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "diplomatic_display", "installation failed; off");return;}
+    BlockInstall blocks;blocks.AddAll(g_diploDisplay.blocks);
+    if(!InstallBlocks(blocks,"diplomatic_display"))return;
     Log(LogLevel::Info, "diplomatic_display", "wide localized base, component, modifier, borrowed and federation values");
 }
 diplovotes::Locations g_diploVotes;
@@ -2793,37 +2833,22 @@ federationsums::Locations g_federationSums;
 void InstallFederationSums(HMODULE self,const locate::Image& image){
     if(!DiplomacyPartWanted(self,"federation_sums"))return;
     std::string error;if(!federationsums::Locate(image,g_federationSums,error)){Log(LogLevel::Error, "federation_sums", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[federationsums::kCount],originals[federationsums::kCount];
-    for(size_t i=0;i<federationsums::kCount;++i){auto& b=g_federationSums.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "federation_sums", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(size_t i=0;i<federationsums::kCount;++i)if(!WriteCode(g_federationSums.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(size_t j=0;j<i;++j)WriteCode(g_federationSums.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "federation_sums", "installation failed; off");return;}
+    BlockInstall blocks;blocks.AddAll(g_federationSums.blocks);
+    if(!InstallBlocks(blocks,"federation_sums"))return;
     Log(LogLevel::Info, "federation_sums", "exact AI acceptance, predictions and law/type views");
 }
 void InstallDiplomaticVotes(HMODULE self,const locate::Image& img){
     if(!DiplomacyPartWanted(self,"diplomatic_votes"))return;
     std::string error;if(!diplovotes::Locate(img,g_diploVotes,error)){Log(LogLevel::Error, "diplomatic_votes", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[7],originals[7];
-    for(size_t i=0;i<7;++i){auto& b=g_diploVotes.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "diplomatic_votes", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(size_t i=0;i<7;++i)if(!WriteCode(g_diploVotes.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(size_t j=0;j<i;++j)WriteCode(g_diploVotes.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "diplomatic_votes", "installation failed; off");return;}
+    BlockInstall blocks;blocks.AddAll(g_diploVotes.blocks);
+    if(!InstallBlocks(blocks,"diplomatic_votes"))return;
     Log(LogLevel::Info, "diplomatic_votes", "wide resolution/federation votes and coupled community totals");
 }
 void InstallDiplomaticScores(HMODULE self,const locate::Image& img){
     if(!DiplomacyPartWanted(self,"diplomatic_scores"))return;
     std::string error;if(!diploscores::Locate(img,g_diploScores,error)){Log(LogLevel::Error, "diplomatic_scores", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[diploscores::kBlockCount],originals[diploscores::kBlockCount];
-    for(size_t i=0;i<diploscores::kBlockCount;++i){auto& b=g_diploScores.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "diplomatic_scores", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(size_t i=0;i<diploscores::kBlockCount;++i)if(!WriteCode(g_diploScores.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(size_t j=0;j<i;++j)WriteCode(g_diploScores.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "diplomatic_scores", "installation failed; off");return;}
+    BlockInstall blocks;blocks.AddAll(g_diploScores.blocks);
+    if(!InstallBlocks(blocks,"diplomatic_scores"))return;
     Log(LogLevel::Info, "diplomatic_scores", "exact technology, economy, job weights and individual/total favor loans");
 }
 
@@ -2834,13 +2859,9 @@ void InstallCountryTotals(HMODULE self,const locate::Image& img){
     bool population=DiplomacyPartWanted(self,"country_totals");
     if(!fleet && !population)return;
     std::string error;if(!countrytotals::Locate(img,g_countryTotals,error)){Log(LogLevel::Error, "country_totals", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[3],originals[3];bool enabled[]={fleet,fleet,population};
-    for(int i=0;i<3;++i)if(enabled[i]){auto& b=g_countryTotals.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "country_totals", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(int i=0;i<3;++i)if(enabled[i] && !WriteCode(g_countryTotals.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(int j=0;j<i;++j)if(enabled[j])WriteCode(g_countryTotals.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "country_totals", "installation failed; off");return;}
+    BlockInstall blocks;bool enabled[]={fleet,fleet,population};
+    for(int i=0;i<3;++i)if(enabled[i])blocks.Add(g_countryTotals.blocks[i]);
+    if(!InstallBlocks(blocks,"country_totals"))return;
     Log(LogLevel::Info, "country_totals", "wide fleet totals=%d; wide population weight=%d",fleet,population);
 }
 
@@ -2874,13 +2895,8 @@ void InstallIncomeArithmetic(HMODULE self,const locate::Image& img){
 void InstallForecastArithmetic(HMODULE self,const locate::Image& img){
     auto ini=IniPath(self);if(ini.empty() || !GetPrivateProfileIntA("numeric_fixes","income_forecast_arithmetic",0,ini.c_str()))return;
     std::string error;if(!forecastoverflow::Locate(img,g_forecastOverflow,error)){Log(LogLevel::Error, "income_forecast", "%s; off",error.c_str());return;}
-    std::vector<uint8_t> jumps[3],originals[3];
-    for(int i=0;i<3;++i){auto& b=g_forecastOverflow.blocks[i];auto stub=AllocNear(b.at,1024);
-        if(!stub || !numericpatch::Prepare(b,stub,1024,jumps[i])){Log(LogLevel::Error, "income_forecast", "cannot prepare stubs; off");return;}
-        originals[i].assign(b.at,b.at+b.stolen);}
-    for(int i=0;i<3;++i)if(!WriteCode(g_forecastOverflow.blocks[i].at,jumps[i].data(),jumps[i].size())){
-        for(int j=0;j<i;++j)WriteCode(g_forecastOverflow.blocks[j].at,originals[j].data(),originals[j].size());
-        Log(LogLevel::Error, "income_forecast", "installation failed; off");return;}
+    BlockInstall blocks;blocks.AddAll(g_forecastOverflow.blocks);
+    if(!InstallBlocks(blocks,"income_forecast"))return;
     Log(LogLevel::Info, "income_forecast", "wide income + production - upkeep; checked target differences");
 }
 
@@ -3568,8 +3584,7 @@ void LogAiFixStats() {
 constexpr uint32_t kNoAiTraceId = UINT32_MAX;
 uint32_t g_aiTraceCountry = kNoAiTraceId;
 uint32_t g_aiTraceSystem = kNoAiTraceId;
-int32_t g_aiTraceSystemFleetArray = 0;
-int32_t g_aiTraceAiFlags = 0;
+aifleettrace::Locations g_aiTraceAt{};  // the functions, and the field offsets read from them
 
 using AiTraceScanFn = void (*)(const uint8_t*, const uint8_t*, bool);
 using AiTraceCollectFn = void (*)(const uint8_t*, uint8_t*);
@@ -3597,30 +3612,31 @@ T AiTraceRead(const uint8_t* object, size_t offset, T fallback) {
 }
 
 bool AiTraceMatchingGroup(const uint8_t* group) {
-    return AiTraceRead(group, 0x18, kNoAiTraceId) == g_aiTraceSystem &&
-           AiTraceRead(group, 0x58, kNoAiTraceId) == g_aiTraceCountry;
+    return AiTraceRead(group, g_aiTraceAt.groupSystem, kNoAiTraceId) == g_aiTraceSystem &&
+           AiTraceRead(group, g_aiTraceAt.groupCountry, kNoAiTraceId) == g_aiTraceCountry;
 }
 
 void AiTraceLogScan(const uint8_t* minister, const uint8_t* system, bool local) {
+    const auto& at = g_aiTraceAt;
     __try {
         const auto country = g_aiTraceCountryFor(minister);
-        if (!country || *reinterpret_cast<const uint32_t*>(country + 0x20) != g_aiTraceCountry) return;
-        const auto aiModule = *reinterpret_cast<const uint8_t* const*>(minister + 8);
+        if (!country || *reinterpret_cast<const uint32_t*>(country + at.countryId) != g_aiTraceCountry) return;
+        const auto aiModule = *reinterpret_cast<const uint8_t* const*>(minister + at.ministerModule);
         const auto moduleVtable = *reinterpret_cast<const uintptr_t* const*>(aiModule);
         using GetAi = const uint8_t* (*)(const uint8_t*);
-        const auto ai = reinterpret_cast<GetAi>(moduleVtable[0x28 / 8])(aiModule);
+        const auto ai = reinterpret_cast<GetAi>(moduleVtable[at.moduleAiSlot / 8])(aiModule);
         const auto aiVtable = *reinterpret_cast<const uintptr_t* const*>(ai);
         using GetStrategies = const uint8_t* (*)(const uint8_t*, int);
-        const auto strategies = reinterpret_cast<GetStrategies>(aiVtable[0x20 / 8])(ai, 14);
-        const auto entries = *reinterpret_cast<const uint8_t* const* const*>(strategies + 8);
-        const int count = *reinterpret_cast<const int*>(strategies + 0x14);
-        const auto ids = *reinterpret_cast<const uint32_t* const*>(system + g_aiTraceSystemFleetArray);
-        const int fleetCount = *reinterpret_cast<const int*>(system + g_aiTraceSystemFleetArray + 12);
-        const bool preparingWar = (*reinterpret_cast<const uint32_t*>(ai + g_aiTraceAiFlags) & 4) != 0;
+        const auto strategies = reinterpret_cast<GetStrategies>(aiVtable[at.aiStrategiesSlot / 8])(ai, static_cast<int>(at.hostileList));
+        const auto entries = *reinterpret_cast<const uint8_t* const* const*>(strategies + at.strategiesEntries);
+        const int count = *reinterpret_cast<const int*>(strategies + at.strategiesCount);
+        const auto ids = *reinterpret_cast<const uint32_t* const*>(system + at.systemFleetArray);
+        const int fleetCount = *reinterpret_cast<const int*>(system + at.systemFleetArray + 12);
+        const bool preparingWar = (*reinterpret_cast<const uint32_t*>(ai + at.aiFlags) & 4) != 0;
         Log(LogLevel::Debug, "ai_fleet_trace", "scan local=%d prepare_war=%d armed_conflict_with_allies=%d fleets_present=%d",
             local, preparingWar, g_aiTraceArmedConflict(country), fleetCount);
         for (int i = 0; i < count; ++i) {
-            const auto id = *reinterpret_cast<const uint32_t*>(entries[i] + 8);
+            const auto id = *reinterpret_cast<const uint32_t*>(entries[i] + at.entryTarget);
             for (int j = 0; j < fleetCount; ++j) {
                 if (ids[j] != id) continue;
                 Log(LogLevel::Debug, "ai_fleet_trace", "hostile target=%u in strategy list", id);
@@ -3634,23 +3650,25 @@ void AiTraceLogScan(const uint8_t* minister, const uint8_t* system, bool local) 
 
 void AiTraceScanHook(const uint8_t* minister, const uint8_t* system, bool local) {
     g_aiTraceScan(minister, system, local);
-    if (AiTraceRead(system, 8, kNoAiTraceId) == g_aiTraceSystem) AiTraceLogScan(minister, system, local);
+    if (AiTraceRead(system, g_aiTraceAt.systemId, kNoAiTraceId) == g_aiTraceSystem) AiTraceLogScan(minister, system, local);
 }
 
 void AiTraceCollectHook(const uint8_t* minister, uint8_t* available) {
     g_aiTraceCollect(minister, available);
-    if (AiTraceRead(g_aiTraceCountryFor(minister), 0x20, kNoAiTraceId) == g_aiTraceCountry) {
-        Log(LogLevel::Debug, "ai_fleet_trace", "collected %d available fleets", AiTraceRead(available, 0x14, -1));
+    if (AiTraceRead(g_aiTraceCountryFor(minister), g_aiTraceAt.countryId, kNoAiTraceId) == g_aiTraceCountry) {
+        Log(LogLevel::Debug, "ai_fleet_trace", "collected %d available fleets",
+            AiTraceRead(available, g_aiTraceAt.availableCount, -1));
     }
 }
 
+// The target is a military group's leading part, so it has the group's target and system fields.
 int64_t* AiTraceWantedHook(const uint8_t* minister, int64_t* power, int mission,
                           const uint8_t* target, void* explanation) {
     auto result = g_aiTraceWanted(minister, power, mission, target, explanation);
-    if (AiTraceRead(target, 0x18, kNoAiTraceId) != g_aiTraceSystem ||
-        AiTraceRead(g_aiTraceCountryFor(minister), 0x20, kNoAiTraceId) != g_aiTraceCountry) return result;
+    if (AiTraceRead(target, g_aiTraceAt.groupSystem, kNoAiTraceId) != g_aiTraceSystem ||
+        AiTraceRead(g_aiTraceCountryFor(minister), g_aiTraceAt.countryId, kNoAiTraceId) != g_aiTraceCountry) return result;
     Log(LogLevel::Debug, "ai_fleet_trace", "target=%u mission=%d required_power=%.2f",
-        AiTraceRead(target, 0x10, kNoAiTraceId), mission, *power / 32768.0);
+        AiTraceRead(target, g_aiTraceAt.groupTarget, kNoAiTraceId), mission, *power / 32768.0);
     return result;
 }
 
@@ -3659,13 +3677,13 @@ int64_t* AiTraceAssignHook(const uint8_t* minister, int64_t* power, const uint8_
     const bool trace = AiTraceMatchingGroup(group);
     if (trace) {
         Log(LogLevel::Debug, "ai_fleet_trace", "assign target=%u mission=%u available_fleets=%d max_distance=%d",
-            AiTraceRead(group, 0x10, kNoAiTraceId), AiTraceRead(group, 0x30, kNoAiTraceId),
-            AiTraceRead(available, 0x14, -1), maxDistance);
+            AiTraceRead(group, g_aiTraceAt.groupTarget, kNoAiTraceId), AiTraceRead(group, g_aiTraceAt.groupMission, kNoAiTraceId),
+            AiTraceRead(available, g_aiTraceAt.availableCount, -1), maxDistance);
     }
     auto result = g_aiTraceAssign(minister, power, available, group, maxDistance, armedConflict);
     if (trace) {
         Log(LogLevel::Debug, "ai_fleet_trace", "assigned_power=%.2f group_fleets=%d",
-            *power / 32768.0, AiTraceRead(group, 0x54, -1));
+            *power / 32768.0, AiTraceRead(group, g_aiTraceAt.groupFleetCount, -1));
     }
     return result;
 }
@@ -3681,7 +3699,7 @@ int AiTraceAddHook(const uint8_t* group, const void* policy, uint32_t fleet, int
         const char* reason = result >= 0 && result < static_cast<int>(std::size(reasons)) ?
             reasons[result] : "unknown";
         Log(LogLevel::Debug, "ai_fleet_trace", "fleet=%u target=%u add_result=%d (%s)",
-            fleet, AiTraceRead(group, 0x10, kNoAiTraceId), result, reason);
+            fleet, AiTraceRead(group, g_aiTraceAt.groupTarget, kNoAiTraceId), result, reason);
     }
     return result;
 }
@@ -3693,15 +3711,13 @@ void InstallAiFleetTrace(HMODULE self, const locate::Image& image) {
     g_aiTraceSystem = GetPrivateProfileIntA("diagnostics", "ai_fleet_system", -1, ini.c_str());
     if (g_aiTraceCountry == kNoAiTraceId || g_aiTraceSystem == kNoAiTraceId) return;
 
-    aifleettrace::Locations found{};
+    auto& found = g_aiTraceAt;  // filled before any hook can run
     if (!aifleettrace::Locate(image, found)) {
         Log(LogLevel::Error, "ai_fleet_trace", "could not locate the military planner");
         return;
     }
     g_aiTraceCountryFor = reinterpret_cast<AiTraceCountryFn>(found.country);
     g_aiTraceArmedConflict = reinterpret_cast<AiTraceArmedConflictFn>(found.armedConflict);
-    g_aiTraceSystemFleetArray = found.systemFleetArray;
-    g_aiTraceAiFlags = found.aiFlags;
     g_aiTraceScan = reinterpret_cast<AiTraceScanFn>(
         InstallJumpHook(found.scan, aifleettrace::kScanStolen, reinterpret_cast<void*>(&AiTraceScanHook)));
     g_aiTraceCollect = reinterpret_cast<AiTraceCollectFn>(
@@ -4135,6 +4151,24 @@ bool g_mpStoreOn = false;
 pdxstore::Store g_mpGlobal, g_mpSave;                     // a client's copies; under g_storeLock
 std::atomic<const uint8_t*> g_mpSyncedSession{nullptr};  // the session whose snapshot this machine executed
 mpstore::Assembler g_mpAssembler;                         // under g_storeLock
+uint64_t g_mpResyncPosted = 0;  // the host: id of the latest resync request posted (main thread)
+uint64_t g_mpResyncSeen = 0;    // the latest resync request executed here; under g_storeLock
+// The host: a snapshot that the session refused, posted again from the frame (StoreFrame) while
+// storage stays closed everywhere, so the stores it holds cannot change. Also set on any machine
+// where a request executed without the session; the retry drops it if this is not the host.
+// Under g_storeLock.
+bool g_mpRetryPending = false;
+uint64_t g_mpRetryAnswers = 0;
+ULONGLONG g_mpRetryAt = 0, g_mpRetryDelay = 1000;
+// A complete snapshot whose last piece executed while the session could not be found, so neither
+// whether this machine is the host nor the session to open storage for was known. Storage stays
+// refused here until the session is found again (MpStoreReady), and is opened then with it. The
+// next store message drops it, as it revokes readiness on every machine. Under g_storeLock.
+struct MpUnapplied {
+    std::atomic<bool> pending{false};
+    pdxstore::Store global, save;
+    size_t bytes = 0;
+} g_mpUnapplied;
 void(__fastcall* g_origChatExecute)(void*) = nullptr;
 void(__fastcall* g_origStartSend)(void*, void*, bool) = nullptr;
 void(__fastcall* g_origStartSync)(void*) = nullptr;
@@ -4181,11 +4215,44 @@ MpRole MpRoleNow() {
     return host ? MpRole::Host : MpRole::Client;
 }
 
+// Puts the host's stores in place and opens storage for `session`. The caller holds g_storeLock.
+void MpApplySnapshot(const uint8_t* session, bool host, pdxstore::Store& global, pdxstore::Store& save, size_t bytes) {
+    size_t globalKeys = global.Count(), saveKeys = save.Count();
+    if (host) {
+        // Apply at exactly the same command boundary as clients. Preserve a pending disk write.
+        // Nothing was written since the snapshot was taken (at the resync request) or no game was running.
+        bool dirty = g_globalStore.Dirty() || g_globalStore.Values() != global.Values();
+        g_globalStore = std::move(global);
+        if (dirty) g_globalStore.MarkDirty();
+        g_saveStore = std::move(save);
+    } else {
+        g_mpGlobal = std::move(global);
+        g_mpSave = std::move(save);
+    }
+    g_mpSyncedSession.store(session);
+    Log(LogLevel::Info, "script_storage", "took the host's stores: %zu global and %zu save keys, %zu bytes", globalKeys, saveKeys,
+        bytes);
+}
+
+// The snapshot that completed while the session could not be found, once it can be.
+void MpApplyUnapplied() {
+    if (!g_mpUnapplied.pending.load()) return;
+    uint8_t* session = MpSession();
+    bool host = false;
+    int type = 0;
+    if (!MpReadSession(session, &host, &type)) return;
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    if (!g_mpUnapplied.pending.load()) return;
+    g_mpUnapplied.pending.store(false);
+    MpApplySnapshot(session, host, g_mpUnapplied.global, g_mpUnapplied.save, g_mpUnapplied.bytes);
+}
+
 // Whether script may use the stores now: always in single player, and in multiplayer once this
 // machine has executed the snapshot of the session it is in, including the host.
 bool MpStoreReady(MpRole* role) {
     *role = MpRoleNow();
     if (*role == MpRole::Single) return true;
+    MpApplyUnapplied();
     const uint8_t* synced = g_mpSyncedSession.load();
     return synced && MpSession() == synced;
 }
@@ -4211,14 +4278,14 @@ bool MpPostText(uint8_t* session, const char* text) {
 
 pdxstore::Store& StoreFor(pdxstore::Which which);
 
-// The host sends both stores to every player. Main thread.
-bool MpPostSnapshot(uint8_t* session, const char* when, bool newGame = false) {
+// The host sends both stores to every player, answering resync request `answers`. Main thread.
+bool MpPostSnapshot(uint8_t* session, const char* when, uint64_t answers, bool newGame = false) {
     std::string snapshot;
     size_t globalKeys = 0, saveKeys = 0;
     {
         std::lock_guard<std::mutex> lock(g_storeLock);
         StoreFor(pdxstore::Which::Global);  // reads the file the first time
-        snapshot = mpstore::MakeSnapshot(g_globalStore, newGame ? pdxstore::Store{} : g_saveStore);
+        snapshot = mpstore::MakeSnapshot(g_globalStore, newGame ? pdxstore::Store{} : g_saveStore, answers);
         globalKeys = g_globalStore.Count();
         saveKeys = newGame ? 0 : g_saveStore.Count();
     }
@@ -4246,7 +4313,8 @@ void __fastcall MpStartSyncHook(void* setup) {
     int type = 0;
     MpReadSession(session, &host, &type);
     if (session && host && type == mpstore::kLobbyHostSession) {
-        if (!MpPostSnapshot(session, "the lobby starts the game", true)) {
+        // Answers no request: the latest one posted, so that no machine finds it older than one it saw.
+        if (!MpPostSnapshot(session, "the lobby starts the game", g_mpResyncPosted, true)) {
             Log(LogLevel::Error, "script_storage", "game start blocked; retry after fixing the session");
             return;
         }
@@ -4277,7 +4345,7 @@ void __fastcall MpStartSendHook(void* handler, void* blob, bool reset) {
     int type = 0;
     MpReadSession(session, &host, &type);
     if (session && host && StoreMultiplayer() && MpIsSaveTransfer(handler, session) &&
-        !MpPostText(session, mpstore::kResync)) {
+        !MpPostText(session, mpstore::ResyncMessage(++g_mpResyncPosted).c_str())) {
         Log(LogLevel::Error, "script_storage", "the session refused a store command (a player receives the game); "
             "transfer blocked, retry after fixing the session");
         return;
@@ -4295,30 +4363,48 @@ void __fastcall MpSessionInitHook(void* session, void* server, int basicType, in
         g_mpSave = pdxstore::Store{};
         g_recording = StoreRecording{};
         g_storeRuns.clear();
+        g_mpResyncSeen = 0;  // g_mpResyncPosted keeps rising: a new session's ids stay above 0
+        g_mpRetryPending = false;
+        g_mpUnapplied.pending.store(false);
     }
     g_origSessionInit(session, server, basicType, type);
 }
 
-// A chat text that begins with mpstore::kPrefix: a piece of the host's stores.
+// A chat text that begins with mpstore::kPrefix: a piece of the host's stores. Every machine takes
+// it even if it cannot find the session now, so that readiness, the latest request and the pieces
+// stay the same everywhere; only the host's snapshot post and opening storage need the session.
 void MpTakeMessage(const std::string& text) {
     uint8_t* session = MpSession();
     bool host = false;
     int type = 0;
-    if (!MpReadSession(session, &host, &type)) return;
+    bool known = MpReadSession(session, &host, &type);
     std::string snapshot, error;
     mpstore::Assembler::Result result = mpstore::Assembler::Result::NotOurs;
-    bool resync = text == mpstore::kResync;
+    uint64_t request = 0;
+    bool resync = mpstore::ParseResync(text, &request);
     {
         std::lock_guard<std::mutex> lock(g_storeLock);
         // The ordered command, not the local send, revokes readiness on every peer.
         g_mpSyncedSession.store(nullptr);
+        g_mpUnapplied.pending.store(false);
         if (text == mpstore::kDisabled) {
             g_mpAssembler.Reset();
+            g_mpRetryPending = false;
             Log(LogLevel::Warn, "script_storage", "host disabled storage for this multiplayer game (snapshot too large)");
             return;
         }
         if (resync) {
             g_mpAssembler.Reset();
+            if (request > g_mpResyncSeen) g_mpResyncSeen = request;
+            // An earlier pending snapshot is superseded: this request gets its own. Without the
+            // session, whether this machine is the host is not known; MpRetrySnapshot posts the
+            // snapshot once the session is found if it is, and drops it if not.
+            g_mpRetryPending = !known;
+            if (!known) {
+                g_mpRetryAnswers = request;
+                g_mpRetryDelay = 1000;
+                g_mpRetryAt = GetTickCount64() + g_mpRetryDelay;
+            }
         } else {
             result = g_mpAssembler.Feed(text, &snapshot, &error);
         }
@@ -4327,8 +4413,19 @@ void MpTakeMessage(const std::string& text) {
         // Every machine is at this boundary with the same stores and refuses storage from here until
         // the snapshot's last piece executes, so the snapshot taken now loses no write. Posting while
         // a command executes is what the AI does during the tick command.
-        if (host && !MpPostSnapshot(session, "a player receives the game")) {
-            StoreProblem("multiplayer: the host could not send its stores; storage is off in this game until they are sent again");
+        if (!known) {
+            StoreProblem("multiplayer: a resync request executed while the session could not be found; "
+                         "if this is the host, its stores are posted from the next frames");
+        } else if (host && !MpPostSnapshot(session, "a player receives the game", request)) {
+            {
+                std::lock_guard<std::mutex> lock(g_storeLock);
+                g_mpRetryPending = true;
+                g_mpRetryAnswers = request;
+                g_mpRetryDelay = 1000;
+                g_mpRetryAt = GetTickCount64() + g_mpRetryDelay;
+            }
+            StoreProblem("multiplayer: the session refused the host's stores; storage is off until they are sent, "
+                         "which is retried from the next frames");
         }
         return;
     }
@@ -4338,29 +4435,29 @@ void MpTakeMessage(const std::string& text) {
     }
     if (result != mpstore::Assembler::Result::Complete) return;
     pdxstore::Store global, save;
-    if (!mpstore::ReadSnapshot(snapshot, global, save, error)) {
-        g_mpSyncedSession.store(nullptr);
+    uint64_t answers = 0;
+    if (!mpstore::ReadSnapshot(snapshot, global, save, error, &answers)) {
         StoreProblem("multiplayer: the host's stores: %s; storage is off in this game", error.c_str());
         return;
     }
-    size_t globalKeys = global.Count(), saveKeys = save.Count();
-    {
-        std::lock_guard<std::mutex> lock(g_storeLock);
-        if (host) {
-            // Apply at exactly the same command boundary as clients. Preserve a pending disk write.
-            // Nothing was written since the snapshot was taken (kResync) or no game was running.
-            bool dirty = g_globalStore.Dirty() || g_globalStore.Values() != global.Values();
-            g_globalStore = std::move(global);
-            if (dirty) g_globalStore.MarkDirty();
-            g_saveStore = std::move(save);
-        } else {
-            g_mpGlobal = std::move(global);
-            g_mpSave = std::move(save);
-        }
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    if (answers < g_mpResyncSeen) {
+        // A later request executed after this one: its snapshot is still to come, and storage
+        // stays closed until then, on every machine alike.
+        Log(LogLevel::Info, "script_storage", "a snapshot for request %llu arrived after request %llu; waiting for its snapshot",
+            static_cast<unsigned long long>(answers), static_cast<unsigned long long>(g_mpResyncSeen));
+        return;
     }
-    g_mpSyncedSession.store(session);
-    Log(LogLevel::Info, "script_storage", "took the host's stores: %zu global and %zu save keys, %zu bytes", globalKeys, saveKeys,
-        snapshot.size());
+    if (!known) {
+        g_mpUnapplied.global = std::move(global);
+        g_mpUnapplied.save = std::move(save);
+        g_mpUnapplied.bytes = snapshot.size();
+        g_mpUnapplied.pending.store(true);
+        Log(LogLevel::Warn, "script_storage", "the host's stores arrived while the session could not be found; "
+            "they are taken when it is found again");
+        return;
+    }
+    MpApplySnapshot(session, host, global, save, snapshot.size());
 }
 
 // The command's text, or -1. No C++ objects here, for __try.
@@ -4657,8 +4754,36 @@ bool RunStoredEffect(const char* text, game::ConsoleResult* result) {
 
 // Once per frame, on the main thread between ticks: runs what `run` queued, ends a recording left
 // open, and writes the global store at most once a second.
+// The host, while a snapshot the session refused or a request taken without the session is
+// pending: post it, after 1 s and then twice as long each time up to 30 s. Storage is closed on
+// every machine since the request, so the stores still hold what the request saw.
+void MpRetrySnapshot() {
+    uint64_t answers = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_storeLock);
+        ULONGLONG now = GetTickCount64();
+        if (!g_mpRetryPending || now < g_mpRetryAt) return;
+        g_mpRetryDelay = (std::min)(g_mpRetryDelay * 2, ULONGLONG(30000));
+        g_mpRetryAt = now + g_mpRetryDelay;
+        answers = g_mpRetryAnswers;
+    }
+    uint8_t* session = MpSession();
+    bool host = false;
+    int type = 0;
+    if (!MpReadSession(session, &host, &type)) return;  // try again at the next deadline
+    if (!host || g_mpSyncedSession.load()) {
+        std::lock_guard<std::mutex> lock(g_storeLock);
+        g_mpRetryPending = false;  // no longer the host, or storage reopened: nothing to resend
+        return;
+    }
+    if (!MpPostSnapshot(session, "posted from the frame after its request", answers)) return;
+    std::lock_guard<std::mutex> lock(g_storeLock);
+    if (g_mpRetryAnswers == answers) g_mpRetryPending = false;
+}
+
 void StoreFrame() {
     if (!g_storeOn) return;
+    if (g_mpStoreOn) MpRetrySnapshot();
     std::vector<StoreRun> runs;
     std::vector<std::string> texts;
     {
@@ -5481,6 +5606,11 @@ void MaybeLogSummary() {
     LogDeferredStats();
     LogFileLookupStats();
     LogStoreStats();
+    if (uint64_t skipped = resourceledger::skipped.load(); skipped || g_resourceLedger.batchChecksOnly.load()) {
+        Log(LogLevel::Stats, "stockpile", "out_of_table_skipped=%llu batch_checks_only=%d skipped_batches=%llu",
+            static_cast<unsigned long long>(skipped), int(g_resourceLedger.batchChecksOnly.load()),
+            static_cast<unsigned long long>(resourceledger::skippedBatches.load()));
+    }
     LogAiFixStats();
 }
 

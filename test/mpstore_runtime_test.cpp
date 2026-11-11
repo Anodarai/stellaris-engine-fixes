@@ -75,7 +75,7 @@ int main() {
     session[g_mpStore.hostFlag] = 1;
     g_globalStore.Set("host", "42");
     g_saveStore.Set("saved", "5");
-    Check(MpPostSnapshot(session, "test") && !Ready(), "posting does not make the host ready");
+    Check(MpPostSnapshot(session, "test", 0) && !Ready(), "posting does not make the host ready");
     const auto snapshot = posted;
     for (const auto& m : snapshot) Deliver(m);
     Check(Ready() && g_globalStore.Dirty() && g_saveStore.Get("saved"), "host echo activates storage and keeps pending writes");
@@ -125,7 +125,7 @@ int main() {
     name = BorrowString("HotJoinData");
     memcpy(transfer + g_mpStore.transferName, &name, sizeof(name));
     MpStartSendHook(transfer, nullptr, true);
-    Check(sendCalls == 2 && posted.size() == 1 && posted[0] == mpstore::kResync && Ready(),
+    Check(sendCalls == 2 && posted.size() == 1 && posted[0] == mpstore::ResyncMessage(1) && Ready(),
           "save transfer posts a resync request before forwarding, readiness unchanged locally");
     // Script on the host writes before the request executes; the snapshot must keep it.
     g_globalStore.Set("beforeResync", "7");
@@ -145,23 +145,130 @@ int main() {
     Check(Ready() && g_mpGlobal.Get("beforeResync"), "a client takes the snapshot posted at the request");
     session[g_mpStore.hostFlag] = 1;
     for (const auto& m : resnapshot) Deliver(m);
+
+    // Two joins in flight: both requests execute before either snapshot. The first snapshot must not
+    // reopen storage, or a write made then would be undone by the second, taken before it.
+    posted.clear();
+    MpStartSendHook(transfer, nullptr, true);
+    MpStartSendHook(transfer, nullptr, true);
+    const auto requests = posted;  // requests 2 and 3
+    Check(requests.size() == 2 && requests[0] == mpstore::ResyncMessage(2) && requests[1] == mpstore::ResyncMessage(3),
+          "each request has the next id");
+    posted.clear();
+    Deliver(requests[0]);
+    const auto first = posted;
+    posted.clear();
+    Deliver(requests[1]);
+    const auto second = posted;
+    posted.clear();
+    for (const auto& m : first) Deliver(m);
+    Check(!Ready(), "the earlier request's snapshot does not reopen storage once a later request executed");
+    for (const auto& m : second) Deliver(m);
+    Check(Ready(), "the latest request's snapshot reopens storage");
+    // A joiner that saw only the later request agrees: closed after the first snapshot, open after the second.
+    session[g_mpStore.hostFlag] = 0;
+    MpSessionInitHook(session, nullptr, 0, 0);
+    Deliver(requests[1]);
+    for (const auto& m : first) Deliver(m);
+    Check(!Ready(), "a joiner that missed the earlier request stays closed for its snapshot too");
+    for (const auto& m : second) Deliver(m);
+    Check(Ready() && g_mpGlobal.Get("beforeResync"), "and opens with the latest snapshot");
+    session[g_mpStore.hostFlag] = 1;
+    MpSessionInitHook(session, nullptr, 0, 0);
+    for (const auto& m : second) Deliver(m);
+
+    // The session refuses the snapshot where the request executes: the host posts it again later.
+    posted.clear();
+    MpStartSendHook(transfer, nullptr, true);
+    const auto retryRequest = posted;  // request 4
     posted.clear();
     acceptPosts = false;
-    int before = deletedCommands;
+    Deliver(retryRequest[0]);
+    Check(!Ready() && g_mpRetryPending && g_mpRetryAnswers == 4, "a refused snapshot is kept to post again");
+    acceptPosts = true;
+    MpRetrySnapshot();
+    Check(posted.empty() && g_mpRetryPending, "not before its delay");
+    // AccessSession may be unavailable for a frame even though the same session resumes.
+    currentIdler = nullptr;
+    g_mpRetryAt = 0;
+    MpRetrySnapshot();
+    Check(posted.empty() && g_mpRetryPending && g_mpRetryAnswers == 4,
+          "a missing session lookup keeps the pending snapshot");
+    currentIdler = idler;
+    g_mpRetryAt = 0;
+    MpRetrySnapshot();
+    Check(!posted.empty() && !g_mpRetryPending, "posted again from the frame once due");
+    for (const auto& m : posted) Deliver(m);
+    Check(Ready() && g_globalStore.Get("beforeResync"), "the reposted snapshot reopens storage");
+
+    // The session lookup fails while store messages execute (the idler has no application here, so
+    // the game still counts as multiplayer). Every machine takes them in order anyway; only posting
+    // the host's snapshot and opening storage wait for the session.
+    auto loseSession = [] { *reinterpret_cast<uint8_t**>(idler + g_mpStore.idlerApp) = nullptr; };
+    auto findSession = [] { *reinterpret_cast<uint8_t**>(idler + g_mpStore.idlerApp) = app; };
+    posted.clear();
     MpStartSendHook(transfer, nullptr, true);
-    Check(sendCalls == 2 && deletedCommands == before + 1 && Ready(),
+    const auto lostRequest = posted;  // request 5
+    Check(lostRequest.size() == 1 && lostRequest[0] == mpstore::ResyncMessage(5), "request 5 posted");
+    posted.clear();
+    loseSession();
+    Deliver(lostRequest[0]);
+    Check(!Ready() && posted.empty() && g_mpResyncSeen == 5 && g_mpRetryPending && g_mpRetryAnswers == 5,
+          "a request executed without the session closes storage and keeps the snapshot to post");
+    g_mpRetryAt = 0;
+    MpRetrySnapshot();
+    Check(posted.empty() && g_mpRetryPending, "the retry waits for the session too");
+    findSession();
+    g_mpRetryAt = 0;
+    MpRetrySnapshot();
+    Check(!posted.empty() && !g_mpRetryPending, "the host posts the snapshot once the session is found");
+    const auto lostSnapshot = posted;
+    posted.clear();
+    loseSession();
+    for (const auto& m : lostSnapshot) Deliver(m);
+    Check(!Ready() && g_mpUnapplied.pending.load(), "a snapshot completed without the session is kept");
+    findSession();
+    Check(Ready() && !g_mpUnapplied.pending.load() && g_globalStore.Get("beforeResync"),
+          "the host opens storage with it once the session is found");
+    session[g_mpStore.hostFlag] = 0;
+    loseSession();
+    Deliver(lostRequest[0]);
+    Check(!Ready() && g_mpRetryPending, "a client without the session cannot tell it is not the host");
+    findSession();
+    g_mpRetryAt = 0;
+    MpRetrySnapshot();
+    Check(posted.empty() && !g_mpRetryPending, "and drops the retry once the session shows it");
+    g_mpGlobal.Clear();
+    loseSession();
+    for (const auto& m : lostSnapshot) Deliver(m);
+    findSession();
+    Check(Ready() && g_mpGlobal.Get("beforeResync"), "a client opens storage with the snapshot it kept");
+    loseSession();
+    for (const auto& m : lostSnapshot) Deliver(m);
+    Deliver(chunks[0]);  // another transfer's first piece revokes readiness on every machine
+    findSession();
+    Check(!Ready() && !g_mpUnapplied.pending.load(), "a later store message drops the kept snapshot");
+    session[g_mpStore.hostFlag] = 1;
+    for (const auto& m : lostSnapshot) Deliver(m);
+    Check(Ready(), "the host is ready again");
+
+    posted.clear();
+    acceptPosts = false;
+    int before = deletedCommands, sendsBefore = sendCalls;
+    MpStartSendHook(transfer, nullptr, true);
+    Check(sendCalls == sendsBefore && deletedCommands == before + 1 && Ready(),
           "refused command is freed, transfer blocked, readiness not changed locally");
     acceptPosts = true;
     g_globalStore.Set("huge", std::string(mpstore::kMaxSnapshot, 'x'));
     posted.clear();
-    Check(MpPostSnapshot(session, "oversize") && posted.size() == 1 && posted[0] == mpstore::kDisabled && Ready(),
+    Check(MpPostSnapshot(session, "oversize", g_mpResyncPosted) && posted.size() == 1 && posted[0] == mpstore::kDisabled && Ready(),
           "oversize snapshot posts an ordered disable without locally changing readiness");
     Deliver(posted[0]);
     Check(!Ready(), "host and clients disable at the command boundary");
     g_globalStore.Clear();
     g_saveStore.Set("previousGame", "1");
     posted.clear();
-    MpPostSnapshot(session, "new game", true);
+    MpPostSnapshot(session, "new game", g_mpResyncPosted, true);
     for (const auto& m : posted) Deliver(m);
     Check(Ready() && g_saveStore.Empty(), "new game snapshot does not carry the previous save store");
     printf(failures ? "mpstore_runtime_test: %d FAILED\n" : "mpstore_runtime_test: all passed\n", failures);

@@ -364,7 +364,27 @@ int main(int argc, char** argv) {
         printf("FAIL AI fleet trace: signatures or call targets changed\n");
         ++failures;
     } else {
-        printf("located the AI fleet trace\n");
+        printf("located the AI fleet trace: group target/system/mission/fleets/country +0x%zx/+0x%zx/+0x%zx/+0x%zx/+0x%zx, "
+               "available +0x%zx, ids +0x%zx/+0x%zx, strategy list %u (+0x%zx/+0x%zx, target +0x%zx)\n",
+               fleetTrace.groupTarget, fleetTrace.groupSystem, fleetTrace.groupMission, fleetTrace.groupFleetCount,
+               fleetTrace.groupCountry, fleetTrace.availableCount, fleetTrace.systemId, fleetTrace.countryId,
+               fleetTrace.hostileList, fleetTrace.strategiesEntries, fleetTrace.strategiesCount, fleetTrace.entryTarget);
+        // The offsets the trace hard-coded before it read them from the code.
+        expect("trace group target", fleetTrace.groupTarget, 0x10);
+        expect("trace group system", fleetTrace.groupSystem, 0x18);
+        expect("trace group mission", fleetTrace.groupMission, 0x30);
+        expect("trace group fleet count", fleetTrace.groupFleetCount, 0x54);
+        expect("trace group country", fleetTrace.groupCountry, 0x58);
+        expect("trace available count", fleetTrace.availableCount, 0x14);
+        expect("trace system id", fleetTrace.systemId, 8);
+        expect("trace country id", fleetTrace.countryId, 0x20);
+        expect("trace minister module", fleetTrace.ministerModule, 8);
+        expect("trace module AI slot", fleetTrace.moduleAiSlot, 0x28);
+        expect("trace AI strategies slot", fleetTrace.aiStrategiesSlot, 0x20);
+        expect("trace hostile list", fleetTrace.hostileList, 14);
+        expect("trace strategy entries", fleetTrace.strategiesEntries, 8);
+        expect("trace strategy count", fleetTrace.strategiesCount, 0x14);
+        expect("trace strategy entry target", fleetTrace.entryTarget, 8);
     }
     expect("war score", rva(war.score), 0xc3cc20);
     expect("war declaration eligibility", rva(war.isPossible), 0x9ac4b0);

@@ -88,14 +88,7 @@ inline Integer Loan(const Locations& l,uint8_t* country,uint8_t* lender,int32_t 
 struct LoanEntry {uint32_t country,padding=0;int64_t value;};
 static_assert(sizeof(LoanEntry)==16,"native loan detail entry");
 struct Loans {Integer total;std::vector<LoanEntry> entries;};
-inline uint8_t* ResolveCountry(const Locations& l,uint32_t id){
-    auto db=*l.countryDb;uint32_t index=id&0xffffff;
-    if(db && index<Read<uint32_t>(db,0x20)){
-        auto p=Read<uint8_t*>(Read<uint8_t*>(db,0x18),8+size_t(index)*16);
-        if(p && Read<uint32_t>(p,0x20)==id)return p;
-    }
-    return *l.nullCountry;
-}
+inline uint8_t* ResolveCountry(const Locations& l,uint32_t id){return game::ResolveRefOr(*l.countryDb,id,0x20,*l.nullCountry);}
 inline Loans TotalLoans(const Locations& l,uint8_t* country,uint8_t* resolution,bool details){
     Loans result;if(l.blocked(resolution,country))return result;
     int voters=Read<int>(resolution,0x44),borrowed=Read<int>(country,0x30e4);

@@ -42,8 +42,13 @@ struct Setting {
     std::string section, key, value;
 };
 
+// The version of multiplayer storage's messages (mpstore.h), the value of its entry: players whose
+// DLLs exchange stores differently get different checksums. Raise it with mpstore::kPrefix. 1 took
+// a hot join's snapshot when the transfer started and had no resync ids; 2 has both.
+constexpr int kStorageProtocol = 2;
+
 inline void AddScriptStorage(bool enabled, bool multiplayer, std::vector<Setting>& out) {
-    if (enabled && multiplayer) out.push_back({"script_storage", "multiplayer", "1"});
+    if (enabled && multiplayer) out.push_back({"script_storage", "multiplayer", std::to_string(kStorageProtocol)});
 }
 
 // The entries of one ini section as GetPrivateProfileSectionA returns them: "key=value\0...\0\0".

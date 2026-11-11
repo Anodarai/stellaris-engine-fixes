@@ -21,6 +21,7 @@ struct Locations {
     PtrFn owner=nullptr,federation=nullptr,system=nullptr,systemOwner=nullptr;
     PairFn member=nullptr,home=nullptr;BoolFn specialTerritory=nullptr;
     uint8_t** fleetDb=nullptr;uint8_t** nullFleet=nullptr;uint8_t** state=nullptr;const int* dynamic=nullptr;
+    size_t fleetId=0;  // CFleet's own id, from the inlined lookup's `cmp [rdi+id],eax`
 };
 template<class F>F Virtual(uint8_t* object,size_t slot){return reinterpret_cast<F>(Read<uint8_t*>(Read<uint8_t*>(object,0),slot));}
 inline bool Valid(uint8_t* object,size_t slot){return Virtual<BoolFn>(object,slot)(object);}
@@ -67,12 +68,7 @@ inline Integer Penalty(const Locations& l,uint8_t* ship,int id){
     if(maximum.Positive())value=Mul(value,componentmath::Divide(maximum-current,Mul(maximum,Integer(99000))));
     return value;
 }
-inline uint8_t* Fleet(const Locations& l,uint32_t id){
-    auto db=*l.fleetDb;auto index=id&0xffffff;
-    if(db && index<Read<uint32_t>(db,0x20)){auto object=Read<uint8_t*>(Read<uint8_t*>(db,0x18),8+size_t(index)*16);
-        if(object && Read<uint32_t>(object,0x30)==id)return object;}
-    return *l.nullFleet;
-}
+inline uint8_t* Fleet(const Locations& l,uint32_t id){return game::ResolveRefOr(*l.fleetDb,id,l.fleetId,*l.nullFleet);}
 inline uint8_t* System(const Locations& l,uint8_t* ship){
     auto object=ship+0x20;
     // The virtual call returns an object pointer. The lookup reads its reference ID at +0x20.
@@ -112,7 +108,7 @@ inline bool Locate(const locate::Image& image,Locations& l,std::string& error){
     l.system=reinterpret_cast<PtrFn>(rel(0x951));l.systemOwner=reinterpret_cast<PtrFn>(rel(0x959));
     l.member=reinterpret_cast<PairFn>(rel(0x98e));l.home=reinterpret_cast<PairFn>(rel(0xaf2));
     l.specialTerritory=reinterpret_cast<BoolFn>(rel(0xe04));
-    l.fleetDb=reinterpret_cast<uint8_t**>(rel(0xb78));l.nullFleet=reinterpret_cast<uint8_t**>(rel(0xbaa));
+    l.fleetDb=reinterpret_cast<uint8_t**>(rel(0xb78));l.nullFleet=reinterpret_cast<uint8_t**>(rel(0xbaa));l.fleetId=p[0xba4];
     l.dynamic=reinterpret_cast<int*>(rel(0x68a));l.state=reinterpret_cast<uint8_t**>(shipstats::Relative(l.functions[2],0x2c));
     if(rel(0xf48)!=l.functions[1] || rel(0xf75)!=l.functions[2] ||
        shipstats::Relative(l.functions[2],0xcd)!=reinterpret_cast<uint8_t*>(l.stats.modifierTypes)){

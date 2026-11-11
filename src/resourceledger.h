@@ -1,5 +1,7 @@
 // Stockpile arithmetic, before the engine's ordinary capacity/situation handling.
 #pragma once
+#include <algorithm>
+#include <atomic>
 #include <stdexcept>
 #include "locate.h"
 #include "numericmath.h"
@@ -25,6 +27,8 @@ struct Locations {
     size_t recordSize = 0, recordFlags = 0, pairs = 0, pairCount = 0;
     uint8_t** nullResource = nullptr;
     numericpatch::Block batches[2];
+    // Set by a fault inside Batch: from then on the batch hooks only check slots (CheckBatch).
+    std::atomic<bool> batchChecksOnly{false};
 };
 inline bool BatchHook(numericpatch::Context&,const void*);
 inline bool RemoveBatchHook(numericpatch::Context&,const void*);
@@ -80,9 +84,13 @@ inline int Index(const Locations& loc, const uint8_t* resource) {
 }
 inline int64_t* Values(void* table) { return **reinterpret_cast<int64_t***>(table); }
 inline int Count(void* table) { return (*reinterpret_cast<Array**>(table))->count; }
-// The native converter guards its reads of a resource's slot but not its writes. The hooks
-// check a resource's slot before doing anything and leave an out-of-range one to the game,
-// so this code never writes outside its own copy of a table.
+inline int StockpileCount(const Locations& loc) { return *reinterpret_cast<const int*>(*loc.resources+0x14); }
+// The native code guards its reads of a resource's slot but not its writes: the converter's
+// negative-amount path, AddResource and the batches write straight through an out-of-range slot.
+// The hooks never hand such a resource to the game; its change is skipped and counted here.
+// After a fault inside a batch, a batch with such an entry is skipped whole and counted in
+// skippedBatches as well.
+inline std::atomic<uint64_t> skipped{0}, skippedBatches{0};
 inline bool InTable(const Locations& loc, const uint8_t* resource, int count) {
     int index = Index(loc,resource);
     return index >= 0 && index < count;
@@ -157,15 +165,19 @@ struct ChangeProgress {
     // The exception filter reads these even if a native call does not return.
     const char* volatile stage = "enter hook";
     volatile bool effectsStarted = false;
+    bool skipped = false;  // the resource's slot is outside the table: nothing was changed
 };
 
-// False, with nothing changed, when the resource's slot is outside the table: the caller then
-// runs the game's function.
-inline bool Change(const Locations& loc, uint8_t* economy, uint8_t* resource, int64_t amount,
+inline void Change(const Locations& loc, uint8_t* economy, uint8_t* resource, int64_t amount,
                    bool remove, ChangeProgress& progress) {
     progress.stage = "prepare stockpile table";
-    int count = *reinterpret_cast<int*>(*loc.resources+0x14);
-    if (!InTable(loc,resource,count)) return false;
+    int count = StockpileCount(loc);
+    if (!InTable(loc,resource,count)) {
+        progress.stage = "resource outside the stockpile table; skipped";
+        progress.skipped = true;
+        skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     std::vector<int64_t> values(count);
     Table table(values.data(),count,loc.allocatorVtable);
     auto vtable = *reinterpret_cast<uint8_t***>(economy);
@@ -196,17 +208,16 @@ inline bool Change(const Locations& loc, uint8_t* economy, uint8_t* resource, in
     loc.clamp(economy,&table);
     progress.stage = "write stockpile";
     reinterpret_cast<TableFn>(vtable[0x98/8])(economy,&table,false);
-    return true;
 }
 inline uint8_t* Resource(const Locations& loc,int index){
     auto resources=*loc.resources;
     return index>=0 && index<*reinterpret_cast<int*>(resources+0x14)
         ? (*reinterpret_cast<uint8_t***>(resources+8))[index] : *loc.nullResource;
 }
-// False, before any effect, when a slot of the input or of a resource it names is outside the
-// stockpile table: the caller then runs the game's function.
-inline bool Batch(const Locations& loc,uint8_t* economy,void* input,bool remove,int writeFlag,void* situationUpdates,bool& effects){
-    int count=*reinterpret_cast<int*>(*loc.resources+0x14);
+// An input entry without a slot in the stockpile table (past the input's end, or a resource whose
+// slot is out of range) is skipped and counted, with its situation update; the rest go through.
+inline void Batch(const Locations& loc,uint8_t* economy,void* input,bool remove,int writeFlag,void* situationUpdates,bool& effects){
+    int count=StockpileCount(loc);
     std::vector<int64_t> values(count);Table table(values.data(),count,loc.allocatorVtable);
     using TableFn=void(__fastcall*)(uint8_t*,void*,int);
     auto vt=*reinterpret_cast<void***>(economy);
@@ -215,10 +226,11 @@ inline bool Batch(const Locations& loc,uint8_t* economy,void* input,bool remove,
     using Predicate=bool(__fastcall*)(uint8_t*);
     bool valid=reinterpret_cast<Predicate>((*reinterpret_cast<void***>(converter))[1])(converter);
     int inputs=Count(input);
-    if(!valid){if(inputs<count)return false;}
-    else for(int i=0;i<inputs;++i)if(!InTable(loc,Resource(loc,i),count))return false;
-    if(!valid){for(int i=0;i<count;++i)values[i]=remove?numeric::Subtract(values[i],Values(input)[i]):numeric::Add(values[i],Values(input)[i]);}
-    else for(int i=0;i<Count(input);++i){int64_t amount=Values(input)[i];auto resource=Resource(loc,i);
+    if(!valid){int n=(std::min)(count,inputs);
+        if(n<count)skipped.fetch_add(uint64_t(count-n),std::memory_order_relaxed);
+        for(int i=0;i<n;++i)values[i]=remove?numeric::Subtract(values[i],Values(input)[i]):numeric::Add(values[i],Values(input)[i]);}
+    else for(int i=0;i<inputs;++i){int64_t amount=Values(input)[i];auto resource=Resource(loc,i);
+        if(!InTable(loc,resource,count)){skipped.fetch_add(1,std::memory_order_relaxed);continue;}
         auto available=reinterpret_cast<Predicate>((*reinterpret_cast<void***>(resource))[7]);
         if(available(resource)){
             bool subtract=remove ? amount>=0 : amount<0;
@@ -235,13 +247,42 @@ inline bool Batch(const Locations& loc,uint8_t* economy,void* input,bool remove,
             remove?numeric::Negate(amount):amount,remove?nullptr:situationUpdates);}
     }
     effects=true;loc.clamp(economy,&table);reinterpret_cast<TableFn>(vt[0x98/8])(economy,&table,remove?0:writeFlag);
+}
+// How many entries of a batch the game's own code would take outside the stockpile table, counted
+// as Batch skips them: with the converter valid it writes through each input entry's resource
+// slot; without, it reads the input up to the table's count. The converter is asked only when its
+// answer decides the count.
+inline int OutsideTable(const Locations& loc,uint8_t* economy,void* input){
+    int count=StockpileCount(loc),inputs=Count(input),outside=0;
+    for(int i=0;i<inputs;++i)if(!InTable(loc,Resource(loc,i),count))++outside;
+    int missing=inputs<count?count-inputs:0;
+    if(!outside && !missing)return 0;
+    auto converter=*reinterpret_cast<uint8_t**>(economy+loc.converter);
+    using Predicate=bool(__fastcall*)(uint8_t*);
+    return reinterpret_cast<Predicate>((*reinterpret_cast<void***>(converter))[1])(converter)?outside:missing;
+}
+// After a fault, the game's own code runs a batch only when every entry has a slot in the table
+// (false: run it). Otherwise, or if the check itself faults, the whole batch is skipped (true).
+inline bool CheckBatch(const Locations& loc,uint8_t* economy,void* input){
+    int outside=-1;
+    __try{outside=OutsideTable(loc,economy,input);}__except(EXCEPTION_EXECUTE_HANDLER){}
+    if(!outside)return false;
+    skipped.fetch_add(outside>0?uint64_t(outside):1,std::memory_order_relaxed);
+    skippedBatches.fetch_add(1,std::memory_order_relaxed);
     return true;
 }
 inline bool InvokeBatch(numericpatch::Context& c,const void* data,bool remove){
-    auto& l=*const_cast<Locations*>(static_cast<const Locations*>(data));bool effects=false;
-    __try{return Batch(l,reinterpret_cast<uint8_t*>(c.rcx),reinterpret_cast<void*>(c.rdx),remove,
-                       static_cast<int>(c.r8),reinterpret_cast<void*>(c.r9),effects);}
-    __except(EXCEPTION_EXECUTE_HANDLER){l.batches[0].failed=true;l.batches[1].failed=true;return effects;}
+    auto& l=*const_cast<Locations*>(static_cast<const Locations*>(data));
+    auto economy=reinterpret_cast<uint8_t*>(c.rcx);auto input=reinterpret_cast<void*>(c.rdx);
+    if(!l.batchChecksOnly.load(std::memory_order_relaxed)){
+        bool effects=false;
+        __try{Batch(l,economy,input,remove,static_cast<int>(c.r8),reinterpret_cast<void*>(c.r9),effects);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER){
+            l.batchChecksOnly.store(true,std::memory_order_relaxed);
+            if(effects)return true;  // part of the batch is done: the game must not repeat it
+        }
+    }
+    return CheckBatch(l,economy,input);
 }
 inline bool BatchHook(numericpatch::Context& c,const void* data){return InvokeBatch(c,data,false);}
 inline bool RemoveBatchHook(numericpatch::Context& c,const void* data){

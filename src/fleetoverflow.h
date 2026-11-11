@@ -72,14 +72,7 @@ inline bool Locate(const locate::Image& img, Locations& out, std::string& error)
 }
 
 inline uint8_t* Ship(const Locations& loc, uint32_t id) {
-    uint8_t* db = *loc.shipDb;
-    uint32_t index = id & 0xffffff;
-    if (db && index < *reinterpret_cast<uint32_t*>(db + game::kDbCountOffset)) {
-        uint8_t* entries = *reinterpret_cast<uint8_t**>(db + game::kDbEntriesOffset);
-        uint8_t* ship = *reinterpret_cast<uint8_t**>(entries + 8 + size_t(index)*16);
-        if (ship && *reinterpret_cast<uint32_t*>(ship + loc.shipId) == id) return ship;
-    }
-    return *loc.nullShip;
+    return game::ResolveRefOr(*loc.shipDb, id, loc.shipId, *loc.nullShip);
 }
 
 // The outer hook provides SEH. Keep the output untouched until every input was read.

@@ -7,15 +7,7 @@ namespace countrytotals {
 using Predicate=bool(__fastcall*)(uint8_t*);
 using WeightFn=int64_t*(__fastcall*)(uint8_t*,int64_t*,uint8_t*);
 struct Ref {uint8_t** db=nullptr;uint8_t** nullObject=nullptr;size_t id=0;};
-inline uint8_t* Resolve(const Ref& r,uint32_t id){
-    auto db=*r.db;uint32_t index=id&0xffffff;
-    if(db && index<*reinterpret_cast<uint32_t*>(db+0x20)){
-        auto entries=*reinterpret_cast<uint8_t**>(db+0x18);
-        auto object=*reinterpret_cast<uint8_t**>(entries+8+size_t(index)*16);
-        if(object && *reinterpret_cast<uint32_t*>(object+r.id)==id)return object;
-    }
-    return *r.nullObject;
-}
+inline uint8_t* Resolve(const Ref& r,uint32_t id){return game::ResolveRefOr(*r.db,id,r.id,*r.nullObject);}
 struct Locations {
     numericpatch::Block blocks[3];Ref fleet,colony,job,pop;
     Predicate excluded[2]{};WeightFn weight=nullptr;

@@ -165,6 +165,17 @@ and their local files do not supply the session's values. Storage stays unavaila
 current session's complete snapshot has executed, including on the host, and resynchronization
 temporarily suspends storage at an ordered command boundary.
 
+Since v0.2.1, each resynchronization request has an ID, and its snapshot names the request it
+answers. If another join request has already executed, an older snapshot cannot reopen storage
+or undo writes made after it. A refused snapshot is retried from later frames, with delays
+starting at one second and doubling up to 30 seconds; storage stays unavailable meanwhile.
+Temporary session-lookup failures preserve pending requests and incoming snapshot pieces. A
+complete snapshot received during such a failure is held until the session can be found again;
+a later storage message discards that held snapshot.
+
+This uses storage protocol 2, which is included in the settings checksum when multiplayer
+storage is enabled. All peers using this option must update together.
+
 The current limitations are:
 
 - Both serialized stores, including snapshot framing, must fit within 1 MiB; a larger snapshot

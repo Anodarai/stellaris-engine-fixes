@@ -1,6 +1,53 @@
 // Exercise the numeric installers and file-lookup import hooks against a private
 // copy of the mapped game image. No game code runs.
 #include "../src/dllmain.cpp"
+
+namespace {
+int nativeLedgerCalls = 0;
+void __fastcall NativeLedgerChange(uint8_t*, uint8_t*, int64_t) { ++nativeLedgerCalls; }
+void __fastcall NativeLedgerConvert(uint8_t*, void*, uint8_t*, int64_t) { ++nativeLedgerCalls; }
+void __fastcall FaultReadingStockpile(uint8_t*, void*, bool) {
+    RaiseException(0xe0000001, 0, 0, nullptr);
+}
+
+bool TestLedgerFallback() {
+    struct Registry {
+        uint8_t padding[0x14]{};
+        int count = 2;
+    } registry;
+    struct Resource {
+        uint8_t padding[0x18]{};
+        int index;
+        uint8_t* Bytes() { return reinterpret_cast<uint8_t*>(this); }
+    } valid{{}, 0}, pastStockpile{{}, 2}, pastConversion{{}, 1}, negative{{}, -1};
+    uint8_t* registryPtr = reinterpret_cast<uint8_t*>(&registry);
+    g_resourceLedger.resources = &registryPtr;
+    g_resourceLedger.resourceIndex = offsetof(Resource, index);
+    g_ledgerOriginalAdd = g_ledgerOriginalRemove = &NativeLedgerChange;
+    g_ledgerOriginalConvert = &NativeLedgerConvert;
+
+    void* vtable[0x98 / 8]{};
+    vtable[0x90 / 8] = reinterpret_cast<void*>(&FaultReadingStockpile);
+    auto* vtablePtr = vtable;
+    auto* economy = reinterpret_cast<uint8_t*>(&vtablePtr);
+    LedgerAdd(economy, valid.Bytes(), 1);
+    if (!g_ledgerFailed || nativeLedgerCalls != 1) return false;
+
+    int64_t balance = 19;
+    resourceledger::Table table(&balance, 1, nullptr);
+    uint64_t before = resourceledger::skipped.load();
+    LedgerAdd(economy, pastStockpile.Bytes(), 1);
+    LedgerRemove(economy, negative.Bytes(), 1);
+    LedgerConvert(nullptr, &table, pastConversion.Bytes(), -1);
+    if (nativeLedgerCalls != 1 || resourceledger::skipped != before + 3 || balance != 19) return false;
+
+    LedgerAdd(economy, valid.Bytes(), 1);
+    LedgerRemove(economy, valid.Bytes(), 1);
+    LedgerConvert(nullptr, &table, valid.Bytes(), -1);
+    return nativeLedgerCalls == 4;
+}
+}
+
 int main(int argc,char** argv){
     if(argc!=2)return 2;
     HMODULE self=GetModuleHandleW(nullptr);
@@ -64,6 +111,10 @@ int main(int argc,char** argv){
     check(g_designCache.originals[6]!=nullptr,"grouped design descriptions");
     blocks(g_designCache.blocks,6);
     check(g_filesOn && g_origCreateFileW && g_origGetAttributes,"file lookup import hooks");
+    if (!TestLedgerFallback()) {
+        ++failures;
+        puts("FAIL native stockpile fallback must check resource slots after an arithmetic fault");
+    }
     g_log=nullptr;DeleteCriticalSection(&g_logLock);VirtualFree(base,0,MEM_RELEASE);FreeLibrary(mod);
     printf("combined installation: %d failures\n",failures);return failures?1:0;
 }

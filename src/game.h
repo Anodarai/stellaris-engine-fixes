@@ -85,4 +85,21 @@ using AssignFn = void*(__fastcall*)(String* string, const char* text, size_t len
 constexpr size_t kDbCountOffset = 0x20;    // uint32 entry count
 constexpr size_t kDbEntriesOffset = 0x18;  // entries: 16 bytes each, object pointer at +8
 
+// TPdxRef lookup, as the game inlines it: the object for `id` in database `db` (an object's own
+// id at `idOffset`), or nullptr if it is gone. Ids reuse slots, hence the id check.
+inline uint8_t* ResolveRef(uint8_t* db, uint32_t id, size_t idOffset) {
+    uint32_t index = id & 0xFFFFFF;
+    if (!db || index >= *reinterpret_cast<uint32_t*>(db + kDbCountOffset)) return nullptr;
+    uint8_t* entries = *reinterpret_cast<uint8_t**>(db + kDbEntriesOffset);
+    uint8_t* object = *reinterpret_cast<uint8_t**>(entries + 8 + static_cast<size_t>(index) * 16);
+    if (!object || *reinterpret_cast<uint32_t*>(object + idOffset) != id) return nullptr;
+    return object;
+}
+
+// The same, with the type's null instance for a missing object, as most of the game's code does.
+inline uint8_t* ResolveRefOr(uint8_t* db, uint32_t id, size_t idOffset, uint8_t* nullObject) {
+    uint8_t* object = ResolveRef(db, id, idOffset);
+    return object ? object : nullObject;
+}
+
 }  // namespace game

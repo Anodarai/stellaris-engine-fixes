@@ -39,14 +39,8 @@ inline bool Locate(const locate::Image& image,Locations& l,std::string& error){
     return true;
 }
 inline uint8_t* Fleet(const Locations& l,uint8_t* ship){
-    uint32_t id=*reinterpret_cast<uint32_t*>(ship+l.shipFleet),index=id&0xffffff;
-    auto db=*l.fleetDb;
-    if(db && index<*reinterpret_cast<uint32_t*>(db+0x20)){
-        auto entries=*reinterpret_cast<uint8_t**>(db+0x18);
-        auto fleet=*reinterpret_cast<uint8_t**>(entries+8+size_t(index)*16);
-        if(fleet && *reinterpret_cast<uint32_t*>(fleet+l.fleetId)==id)return fleet;
-    }
-    return *l.nullFleet;
+    uint32_t id=*reinterpret_cast<uint32_t*>(ship+l.shipFleet);
+    return game::ResolveRefOr(*l.fleetDb,id,l.fleetId,*l.nullFleet);
 }
 inline bool Hull(const Locations& l,uint8_t* fleet,int64_t& current,int64_t& maximum){
     int count=*reinterpret_cast<int*>(fleet+l.fleet.count);if(count<0)return false;

@@ -1,215 +1,175 @@
-# stellaris-engine-fixes
+# Stellaris Engine Fixes
 
-Performance, load-time, interface, AI and numeric fixes for Stellaris on Windows.
-Offline checks cover Steam and GOG builds 4.5.2 through 4.5.4.
+## Overview
 
-`winmm.dll` goes in the game folder; Windows loads it into the game. Each feature finds the code
-it needs by byte patterns, so it should survive updates that don't change that code. A feature
-whose patterns are not found turns itself off, and the others keep working. Nothing in the game's
-files is changed.
+Stellaris Engine Fixes is a Windows DLL mod for the Steam and GOG versions of Stellaris. It
+improves loading and simulation performance, adds interface shortcuts and outliner sorting,
+and offers optional AI and numeric overflow fixes. The DLL modifies the running game in memory
+without changing the original executable on disk.
 
-Settings are in `stellaris-engine-fixes.ini`. Speed features that have a `..._verify=1` setting can also run
-the game's own code next to the shortcut and log any difference to `stellaris-engine-fixes.log`.
+**Multiplayer has not been tested at all, and all other functionality has had only limited
+testing.** Offline compatibility checks cover Steam and GOG builds 4.5.2 through 4.5.4, but
+those checks do not establish that every feature works correctly during gameplay.
 
-## Logs
+Download the [latest release](https://github.com/Anodarai/stellaris-engine-fixes/releases/latest)
+to get the DLL, its configuration file and the optional launcher mods described below.
 
-`stellaris-engine-fixes.log` stays beside the DLL and is rewritten at launch. Each line has a UTC timestamp,
-a level, a component, and a message.
+## Features overview
 
-```text
-2026-11-11T18:30:00.123Z INFO  fleets | hooks installed
-2026-11-11T18:30:00.145Z WARN  file_lookups | GetFileAttributesExW isn't imported; only opens are answered
-2026-11-11T18:30:00.167Z ERROR token_strings | failed to hook RebuildLookup; off
-2026-11-11T18:30:30.124Z STATS fleets | sorts=410 compares=9300 keys=2050 avg_us=8.1 max_us=52.0 faulted=0
-```
+### Interface
 
-`ERROR` covers failed operations and verification mismatches. `WARN` covers partial fallbacks and
-configuration problems. `INFO` covers normal operation, and `DEBUG` covers hook details and traces.
-`STATS` covers startup timings, periodic counters, and `sef_bench` results.
+- **Fleet sorting:** sorts the outliner by name, with numbers in natural order, so “Fleet 2”
+  appears before “Fleet 10”. Fleets with the same name are ordered by their oldest ship's
+  construction date, which can change when ships are lost or transferred.
+- **Megastructure sorting:** sorts by the current displayed name, keeping acquisition order
+  when names are equal.
+- **Direct trade amounts:** Alt-click an amount or its **+** or **−** button in an empire trade
+  deal or the market's monthly trade window to type a number directly into a focused input.
+- **Construction priority:** Ctrl-click to add a new construction item at the front of a
+  planet's queue; this shortcut is available in single player only.
 
-For parsing, split at the first ` | ` and read the three whitespace-separated fields on the left.
-Messages escape backslashes as `\\`, CR/LF/tab as `\r`, `\n`, and `\t`, and other ASCII controls as
-`\xHH`. `STATS` messages are space-separated `key=value` fields. Numeric units are in the keys
-where applicable, and booleans are `0` or `1`.
+### Performance
 
-## Interface
+These features are enabled by default and are intended to preserve the simulation's results.
 
-- **Fleet outliner order:** fleets sorted by name, naturally ("Fleet 2" before "Fleet 10"); fleets
-  with the same name by their oldest ship's construction date.
-- **Megastructure outliner order:** megastructures sorted by their current name, the same way;
-  same-name ones stay in the order they were acquired.
-- **Trade amounts** (`trade_amount_entry`). Alt-click the amount or its **+** or **−** button in an
-  empire deal or the market’s monthly trade window to open a focused amount field.
-- **Planet construction priority** (`planet_queue_first`). Ctrl-click to put a new construction
-  item at the front of the planet’s queue in single player.
+- **Faster loading with mods:** reduces repeated file searches and script-loading work, and
+  skips generating the modifier documentation log. One measured modded setup went from about
+  67 seconds to 25 seconds on warm starts; results depend on the mod list and system.
+- **Faster simulation at maximum speed:** spends less time drawing frames between and during
+  simulation ticks. Tick batching is available in single player only, and reducing frames
+  during long ticks can make the display less smooth.
+- **Less repeated simulation work:** reduces unnecessary combat bookkeeping and repeated
+  calculations in fleet automation and AI megastructure placement.
+- **Shorter AI income calculations:** avoids extremely long monthly freezes caused by an
+  income-target calculation repeating the same work in very large modded economies.
+- **Replacement memory allocator:** uses mimalloc for the game's memory allocations, with
+  additional memory options available in the configuration reference.
 
-## Performance
+### Optional AI fixes
 
-None of these change what the game computes; they skip repeated or wasted work.
+AI fixes are **disabled by default** because they change how AI empires play. They cover:
 
-**Loading** (warm Steam startup with a large mod list: 67 s to 25 s, best of three)
-- **File lookups** (`fast_file_lookups`): PhysFS looks for every file in each mounted mod folder
-  in turn, and about 94% of the ~1.4 million opens and stats fail. They are answered from folder
-  listings read once, through hooks on the exe's import table.
-- **Script keywords** (`fast_token_rebuild`): `CStaticLexer` refills its whole keyword text
-  table whenever a new keyword appears while mods load; only the new entries are added.
-- **Deferred references** (`fast_deferred_unregister`): while loading, objects that never
-  registered a deferred reference skip the scan of the whole list when they unregister.
-- **Modifier documentation** (`skip_modifier_docs`): `logs/script_documentation/modifiers.log`,
-  a list for modders, isn't written.
+- Keeping construction plans for the full month and processing other items when one is
+  blocked or unaffordable.
+- War planning, distance penalties, opportunist behavior and assessment of hostile boss fleets.
+- More frequent expansion and survey updates, and handling colony or construction ships that
+  have been idle for a long time.
+- Consistent scheduling of AI updates and restoring the AI's saved random-number stream.
 
-**Running the game**
-- **Memory allocator** (`[mimalloc]`): the game's statically linked CRT heap is replaced with
-  mimalloc 3.6.1 before the game starts; large pages are optional.
-- **Frames per game day** (`batch_ticks`, `in_tick_frame_ms`): at the fastest speed the game runs
-  only 2 ticks per frame, and inside long ticks it renders whole frames at the monitor's refresh
-  rate. The DLL runs a day's ticks in 2 frames instead of 5 (batches still end at the AI's tick
-  and the day's tick) and limits frames inside ticks to one per 33 ms. Single player only.
-- **Combat bookkeeping** (`skip_empty_combat_entries`): every tick the game inserts an empty combat
-  record for every fleet; empty ones aren't stored, since a missing record already reads as
-  empty. Measured: 4.5% less simulation time per day.
-- **Fleet automation** (`fast_intel_lookup`): automated fleets' pathfinding asks, for every
-  system it passes, how well each empire detects cloaked fleets there; the answers come from a
-  table built once per search instead of a scan of two lists.
-- **AI megastructure placement** (`mega_afford_cache`): an AI choosing where to build a
-  megastructure checks whether it can afford it once per search instead of once per candidate
-  system.
-- **AI income targets** (`fast_income_target`): each AI month an empire's economic plan adds the
-  income of its "scaling" subplans to a total, round after round, until some resource passes a
-  target taken from the empire's forecast, with no limit on the rounds. A very large economy in an 
-  extremely modded game can need over a billion rounds: a seen case froze the game for half an hour
-  every AI month. Everyround adds the same amount, so the DLL works out the round count after the 
-  first round and sets the total and the counter to what the game's rounds would reach. Verified on
-  that save: 10 billion rounds skipped, 0 differences.
+### Optional numeric fixes
 
-**Measuring:** the console command `sef_bench [seconds]` (default 60) reports days and ticks per
-second and how the main thread's time splits between the simulation, frames inside ticks, and
-frames between ticks. `sef_bench stop` ends a run, `sef_bench show` prints the last one again, and
-`sef_bench combat off|on` switches the combat change while the game runs, for A/B comparisons.
+Numeric fixes are **disabled by default** and address overflow and rounding in resource
+stockpiles, income, diplomatic weight, military power and fleet or ship statistics. They are
+intended for extreme values, such as those reached in heavily modded games, and can change
+simulation results where the original calculations overflow. A separate option fixes the
+display of very large military-power values.
 
-## AI fixes (`[ai_fixes]`, each off by default)
+### Support for other mods
 
-These are places where the country AI's code disagrees with itself or with its own defines. Unlike the speed features they change how AI empires play, so each one is opt-in.
-These fixes affect AI empires. Multiplayer behavior remains unverified.
+Mods can use persistent storage shared across campaigns or associated with individual saves.
+The included Gigastructures preset mod uses it to reuse settings in later games. Storage is
+enabled by default but does nothing unless a mod uses it; the [script storage reference](docs/script-storage.md)
+describes the API and its limitations.
 
-- **Build plan** (`build_plan_keep`): the AI makes a planet build plan once a month, uses it for a
-  week, then deletes it, and its walk of the plan stops at the first item it can't place. With
-  the fix the plan lasts the month, and items whose planet is busy move to the end instead of
-  blocking the rest.
-- **Opportunist trait** (`opportunist_wars`): described as "more likely to attack someone already
-  at war", but the code path never counts that. With the fix, half the fleet power of a target's
-  enemies in its current wars is added to the AI's side.
-- **War distance** (`war_distance_slope`): past `AI_WAR_DECLARATION_MALUS_DISTANCE` the game
-  applies one flat penalty, the same for a target one jump past it as for one across the galaxy.
-  With the fix the penalty grows with each jump past the distance.
-- **Truce divisor** (`truce_war_divisor=N`): a truce divides the AI's war appetite by
-  `AI_AGGRESSIVENESS_BOXED_IN_MULT` (4). The fix makes the divisor its own setting; 4 plays as
-  vanilla, lower values weaken the effect.
-- **Expansion lists** (`expansion_refresh_monthly`): the AI rebuilds its list of colonisation
-  targets monthly for the first 15 years and yearly afterwards. The fix keeps it monthly.
-- **AI schedule** (`ai_schedule_from_date`): each AI's weekly, monthly and yearly updates fall on
-  days counted from when the game started or was loaded, so every load reshuffles them. The fix
-  ties them to the date: days where (country id + day) is a multiple of 7, 30 or 360.
-- **AI random** (`ai_random_from_save`): a loaded AI restarts its random number stream at its id
-  unless the game runs with `-loadrandomseed`. The fix makes it continue the stream stored in the
-  save.
-- **Build plan and expansion**. Optional settings let the AI skip unaffordable plan items,
-  retry surveys monthly, and resume expansion when colony ships or construction ships sit idle.
-- **War planning**. Optional settings make the AI check whether it can start war preparations
-  and account for the threat of hostile boss fleets.
+See the [configuration reference](docs/configuration.md) for every setting, its default and
+its effect, and the [developer guide](docs/development.md) for implementation and validation details.
 
-## Numeric fixes (`[numeric_fixes]`, each off by default)
+## Using
 
-Optional fixes address fixed-point overflow and rounding in income, stockpiles, diplomatic weight,
-and fleet and ship statistics. The INI describes each setting.
+### Install or update
 
-## Multiplayer settings
+1. Close Stellaris and download the ZIP attached to the
+   [release you want to use](https://github.com/Anodarai/stellaris-engine-fixes/releases).
+   If updating, back up your existing `stellaris-engine-fixes.ini` before replacing any files.
+2. Extract `winmm.dll` and `stellaris-engine-fixes.ini` into the game installation folder,
+   beside `stellaris.exe`. In Steam, use **Manage → Browse local files** to find that folder.
+3. Launch the game normally. The DLL loads automatically and writes
+   `stellaris-engine-fixes.log` beside itself; the log reports which features were installed
+   and any problems encountered.
 
-The DLL includes active gameplay-changing AI and numeric fixes in the game checksum by default.
-Use the same DLL and gameplay settings on all peers.
+When updating, apply your chosen settings from the backup to the new INI so that new options
+are available. The optional mods in the ZIP's `mods` folder are installed
+separately through the launcher, as described under [Included mods](#included-mods).
 
-## Script storage for mods (`[script_storage]`)
+### Configure
 
-Paradox script can keep data outside the game, in the `sefdata` folder in the game folder, with
-`log = "@sef:..."` effects and triggers. Nothing happens unless a mod uses them; without the DLL
-they are ordinary `log` lines. Multiplayer storage is off by default. Experimental
-`[script_storage] multiplayer=1` lets the host share store snapshots with clients. Only the host
-writes the store files, and `run` is disabled in multiplayer. Live multiplayer validation is pending.
+Edit `stellaris-engine-fixes.ini` while the game is closed, then restart the game to apply your
+changes. The supplied defaults enable the interface and performance features while leaving AI
+and numeric fixes off. Read the [configuration reference](docs/configuration.md) before enabling
+those optional changes or adjusting memory and frame-pacing settings.
 
-Two stores: `global`, shared by every game (`sefdata\global.txt`), and `save`, which follows the
-save game (`sefdata\saves\<folder>\<name>.txt`: written once a save, including Ironman's save on
-exit, has been written successfully, read when that save loads, empty in a new game). Keys and variable names use letters, digits and `_ . : @ -`.
+The mod does not introduce a new game-save format, although changes to gameplay are saved as
+part of the campaign normally. Mods using script storage also keep data in the separate
+`sefdata` folder beside the DLL; keep that folder with your saves if you need to preserve or
+move their stored data.
 
-| After `@sef:` | Where | What |
-|---|---|---|
-| `global.set KEY = VARIABLE` | effect | stores this scope's variable (an unset one unsets the key) |
-| `global.set KEY = 12.5`, `global.set VARIABLE` | effect | stores a number; `VARIABLE = VARIABLE` |
-| `global.get VARIABLE = KEY`, `global.get VARIABLE` | effect | sets this scope's variable from the store; nothing if the key is unset |
-| `global.clear KEY` | effect | unsets the key |
-| `global.has KEY` | trigger | whether the key is set |
-| `global.record KEY` ... `record_end` | effect | keeps every `log` line in between, as the game writes it (`\[...]` filled in); lines without `=`, `{` or `}` are dropped |
-| `global.run KEY` | effect | runs the recorded lines as an effect at the end of the frame, through the console's `effect` command (on the player's country, or what the interface has selected) |
+Gameplay-changing options are included in the game's checksum by default. Multiplayer has not
+been tested, and achievement compatibility has not been verified; the configuration reference
+explains the relevant settings and restrictions.
 
-`save.` instead of `global.` uses the save store. Problems (a bad command, a full store) are
-written to `stellaris-engine-fixes.log`.
+### Troubleshoot or uninstall
 
-```
-immediate = {
-    log = "@sef:global.get times_played"
-    change_variable = { which = times_played value = 1 }
-    log = "@sef:global.set times_played"
-}
-```
+If a feature is unavailable, check `stellaris-engine-fixes.log` for warnings and errors. The
+log is rewritten at each launch, so copy it before restarting when reporting a problem, along
+with your game version, store and configuration.
 
-`mods/sef_giga_user_preset` uses it for Gigastructural Engineering: an edict, **Save Settings as
-My Preset**, records the settings with Gigastructures' own preset printer, and the menu's **User
-Preset** button loads them in a later game. Copy the folder into `Documents\Paradox
-Interactive\Stellaris\mod`, add it in the launcher, and load it after Gigastructures.
+To uninstall, close the game and delete `winmm.dll` from the game folder. You can keep the INI,
+log and `sefdata` folder if you want to retain settings or stored mod data. Remove any optional
+launcher mods separately if you no longer want to use them.
 
-## Build
+To disable only the replacement memory allocator while keeping the other features, set
+`enabled=0` in the `[mimalloc]` section of the INI.
 
-Needs Visual Studio (2022 or later, any edition, or the Build Tools) with the C++ x64 tools;
-`build.bat` finds it with `vswhere`.
+## Building
+
+Install Visual Studio 2022 or later, or the Visual Studio Build Tools, with the C++ x64 tools
+and a Windows SDK. From the repository root, run:
 
 ```bat
-build.bat
+.\build.bat
 ```
 
-## Install
+The script finds the installed build tools automatically and creates `winmm.dll` and
+`stellaris-engine-fixes.ini` in `build\winmm\`. Copy those two files into the game folder as
+described above. It also builds the test programs.
 
-Close the game first. Take `winmm.dll` and `stellaris-engine-fixes.ini` from a release zip, or
-build them (`build\winmm\`), and copy both into the folder that holds `stellaris.exe`. The DLL
-writes `stellaris-engine-fixes.log` next to itself.
+For offline validation against your game executable, see the [developer guide](docs/development.md).
+The validation runner additionally requires Python 3.10 or later.
 
-## Uninstall
+## Included mods
 
-Delete `winmm.dll` from the game folder. To keep the rest but go back to the game's own heap, set
-`enabled=0` under `[mimalloc]` in `stellaris-engine-fixes.ini` instead.
+The release ZIP also contains optional, normal Stellaris mods in its `mods` folder. Install and
+enable them in a launcher playset separately from the DLL.
 
-## Tests
+### AI claims dead-end systems
 
-Run offline validation from the repository root with Python 3.10+ and the C++ build tools.
+[AI claims dead-end systems](mods/sef_ai_expansion) increases the AI's priority for claiming empty systems
+surrounded by its own territory, helping it fill gaps and dead ends instead of leaving them
+unclaimed. This is a normal defines mod and can be used without the DLL.
 
-```powershell
-python tools/validate_builds.py --exe 'D:\Games\Stellaris\stellaris.exe'
-python tools/validate_builds.py --version 4.5.4
-```
+### Gigastructures: My Preset
 
-Repeat `--exe` to check several installations. For version-based discovery, place Windows game
-executables in `executables/` with names such as `stellaris_454_steam.exe` or
-`stellaris_454_gog.exe`. The runner writes test logs and `report.json` under `build/validation-*/`.
-It checks WinMM imports, signatures, layouts, and patch installation offline. Live gameplay and
-multiplayer require separate testing.
+[Gigastructures: My Preset](mods/sef_giga_user_preset) adds a **Save Settings as My Preset** edict
+that records your current Gigastructural Engineering settings. During a later game's initial Gigastructures setup, choose **Presets → User Preset →
+Enable Preset** to load them. Saving a preset again replaces the previous one.
 
-## Layout
+It requires Gigastructural Engineering, this DLL and `[script_storage] enabled=1`, and should
+load after Gigastructural Engineering in the launcher. Preset loading is available in single
+player only because replaying stored script is disabled in multiplayer.
 
-| Path | What |
-|---|---|
-| `src/dllmain.cpp` | The features and their hooks. |
-| `src/locate.h` | The byte patterns, and the code that reads addresses and offsets out of them. |
-| `src/allocator.h` | The heap replacement, installed from `DllMain` before the game's CRT starts. |
-| `src/pathcache.h`, `natsort.h`, `incometarget.h`, `pdxstore.h`, `game.h` | File lookup cache, name comparison, the income target arithmetic, the script storage's stores and files, game types. |
-| `mods/sef_giga_user_preset` | A Gigastructures submod that saves and loads a settings preset with the script storage. |
-| `src/exports_winmm.h` | The `winmm.dll` exports, forwarded to the system copy. |
-| `test/` | The tests above. |
-| `third_party/mimalloc` | mimalloc 3.6.1 (MIT, see its `LICENSE`). |
+### Install an included mod
+
+1. Copy the chosen mod folder from the ZIP's `mods` folder into
+   `Documents\Paradox Interactive\Stellaris\mod\`.
+2. Copy that folder's `descriptor.mod` into the parent `mod` directory and rename the copy
+   to match the folder, for example `sef_ai_expansion.mod` or `sef_giga_user_preset.mod`.
+3. Open the renamed copy in a text editor and add the matching path line:
+
+   ```text
+   path="mod/sef_ai_expansion"
+   ```
+
+   For the preset mod, use `path="mod/sef_giga_user_preset"` instead. Leave the original
+   `descriptor.mod` inside the mod folder in place.
+4. Restart the launcher, add the mod to your playset and enable it. For the preset mod, also
+   enable Gigastructural Engineering and place the preset mod after it.

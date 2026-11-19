@@ -37,9 +37,9 @@
 
 // Referencing one function per DLL keeps every import in the import table.
 volatile const void* g_keep[] = {
-    &SetupDiGetClassDevsW, &D3DCompile,    &D3D11CreateDevice, &CreateDXGIFactory, &Direct3DCreate9,
-    &glGetError,           &GetDC,         &CreateSolidBrush,  &ShellExecuteW,     &CoInitialize,
-    &SysAllocString,       &RegCloseKey,   &BCryptGenRandom,   &timeGetTime,       &WSAStartup,
+    &SetupDiGetClassDevsW, &D3DCompile,    &D3D11CreateDevice,       &CreateDXGIFactory, &Direct3DCreate9,
+    &glGetError,           &GetDC,         &CreateSolidBrush,        &ShellExecuteW,     &CoInitialize,
+    &SysAllocString,       &RegCloseKey,   &BCryptGenRandom,         &timeGetTime,       &WSAStartup,
     &PathFileExistsW,      &ImmGetContext, &GetFileVersionInfoSizeW, &InternetOpenW,
 };
 

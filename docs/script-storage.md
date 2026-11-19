@@ -37,8 +37,8 @@ Steam or GOG save synchronization should not be assumed to include `sefdata`.
 An absent store file means an empty store, and an empty store's file is removed when it is
 written. Nonempty files use sorted `KEY = "VALUE"` lines with escapes for backslashes, quotes,
 newlines, and carriage returns. Writes go through a temporary file and replacement. The
-serialization and path rules are implemented in [src/pdxstore.h](../src/pdxstore.h), with the
-save-completion hooks in [src/dllmain.cpp](../src/dllmain.cpp).
+serialization and path rules are implemented in [src/storage/pdxstore.h](../src/storage/pdxstore.h),
+with the save-completion hooks in [scriptstorage_lifecycle.inl](../src/storage/scriptstorage_lifecycle.inl).
 
 ## Names, values, and scope
 
@@ -188,8 +188,8 @@ The current limitations are:
   this mechanism has not been validated in a live multiplayer game.
 
 See [Configuration](configuration.md) for checksum settings. The transport and snapshot format
-are implemented in [src/mpstore.h](../src/mpstore.h), while the session callbacks and readiness
-checks are in [src/dllmain.cpp](../src/dllmain.cpp).
+are implemented in [src/storage/mpstore.h](../src/storage/mpstore.h), while the session callbacks
+and readiness checks are in [mpstore_runtime.inl](../src/storage/mpstore_runtime.inl).
 
 ## Diagnosing storage problems
 

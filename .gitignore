@@ -1,6 +1,7 @@
 /build/
 /executables/
 /stellaris.exe
+/tools/bench/saves/*.sav
 __pycache__/
 *.obj
 *.lib

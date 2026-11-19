@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "../src/pathcache.h"
+#include "../src/performance/pathcache.h"
 
 using pathcache::Answer;
 
@@ -14,14 +14,16 @@ namespace {
 
 int g_failures = 0;
 void Expect(const wchar_t* what, Answer got, Answer want) {
-    if (got == want) return;
+    if (got == want)
+        return;
     wprintf(L"FAIL %s: got %d, want %d\n", what, static_cast<int>(got), static_cast<int>(want));
     ++g_failures;
 }
 
 void Touch(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    if (h != INVALID_HANDLE_VALUE)
+        CloseHandle(h);
 }
 
 int UnitTests() {
@@ -86,7 +88,8 @@ DWORD Real(const Lookup& l) {
     if (l.open) {
         HANDLE h = CreateFileW(l.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                                FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return GetLastError();
+        if (h == INVALID_HANDLE_VALUE)
+            return GetLastError();
         CloseHandle(h);
         return 0;
     }
@@ -103,15 +106,19 @@ double Now() {
 
 int Replay(int argc, wchar_t** argv) {
     FILE* f = nullptr;
-    if (_wfopen_s(&f, argv[1], L"r") != 0 || !f) return 2;
+    if (_wfopen_s(&f, argv[1], L"r") != 0 || !f)
+        return 2;
     std::vector<Lookup> all;
     char line[2048];
     wchar_t wide[2048];
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
-        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-        if (n < 2) continue;
-        if (!MultiByteToWideChar(CP_UTF8, 0, line + 1, -1, wide, 2048)) continue;
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = 0;
+        if (n < 2)
+            continue;
+        if (!MultiByteToWideChar(CP_UTF8, 0, line + 1, -1, wide, 2048))
+            continue;
         all.push_back({line[0] == 'o', wide});
     }
     fclose(f);
@@ -119,57 +126,75 @@ int Replay(int argc, wchar_t** argv) {
 
     pathcache::Cache c;
     c.AddRoot(argv[2]);
-    for (int i = 3; i < argc; ++i) c.AddRootMarker(argv[i]);
+    for (int i = 3; i < argc; ++i)
+        c.AddRootMarker(argv[i]);
 
     double t0 = Now();
     size_t missing = 0;
-    for (const Lookup& l : all) missing += Real(l) != 0;
+    for (const Lookup& l : all)
+        missing += Real(l) != 0;
     double real1 = Now() - t0;
     t0 = Now();
-    for (const Lookup& l : all) Real(l);
+    for (const Lookup& l : all)
+        Real(l);
     double real2 = Now() - t0;
 
     t0 = Now();
     size_t file = 0, path = 0, passed = 0;
     for (const Lookup& l : all) {
         switch (c.Query(l.path.c_str())) {
-            case Answer::MissingFile: ++file; break;
-            case Answer::MissingPath: ++path; break;
-            default: ++passed; Real(l); break;
+        case Answer::MissingFile:
+            ++file;
+            break;
+        case Answer::MissingPath:
+            ++path;
+            break;
+        default:
+            ++passed;
+            Real(l);
+            break;
         }
     }
     double cached1 = Now() - t0;
     size_t listings = c.Listings();
     t0 = Now();
     for (const Lookup& l : all) {
-        if (c.Query(l.path.c_str()) == Answer::Unknown) Real(l);
+        if (c.Query(l.path.c_str()) == Answer::Unknown)
+            Real(l);
     }
     double cached2 = Now() - t0;
 
     size_t wrong = 0, wrongCode = 0, shown = 0;
     for (const Lookup& l : all) {
         Answer a = c.Query(l.path.c_str());
-        if (a == Answer::Unknown) continue;
+        if (a == Answer::Unknown)
+            continue;
         DWORD real = Real(l);
         bool ok = real != 0;
         bool code = a == Answer::MissingFile ? real == ERROR_FILE_NOT_FOUND : real == ERROR_PATH_NOT_FOUND;
-        if (!ok) ++wrong;
-        else if (!code) ++wrongCode;
+        if (!ok)
+            ++wrong;
+        else if (!code)
+            ++wrongCode;
         if ((!ok || !code) && shown < 20) {
             ++shown;
-            wprintf(L"  %s: cache %d, real %lu: %s\n", ok ? L"code" : L"WRONG", static_cast<int>(a), real, l.path.c_str());
+            wprintf(L"  %s: cache %d, real %lu: %s\n", ok ? L"code" : L"WRONG", static_cast<int>(a), real,
+                    l.path.c_str());
         }
     }
     printf("really missing: %zu of %zu\n", missing, all.size());
-    printf("answered by the cache: %zu missing file, %zu missing path; passed on %zu; %zu listings\n", file, path, passed, listings);
-    printf("real API: %.2f s, then %.2f s; with the cache: %.2f s (with listing), then %.2f s\n", real1, real2, cached1, cached2);
+    printf("answered by the cache: %zu missing file, %zu missing path; passed on %zu; %zu listings\n", file, path,
+           passed, listings);
+    printf("real API: %.2f s, then %.2f s; with the cache: %.2f s (with listing), then %.2f s\n", real1, real2, cached1,
+           cached2);
     printf("answers wrong: %zu; right but another error code: %zu\n", wrong, wrongCode);
     return wrong ? 1 : 0;
 }
 
-}  // namespace
+} // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc >= 3) return Replay(argc, argv);
+    if (argc >= 3)
+        return Replay(argc, argv);
     return UnitTests();
 }

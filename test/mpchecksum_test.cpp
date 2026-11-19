@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../src/mpchecksum.h"
+#include "../src/storage/mpchecksum.h"
 
 static int g_failures = 0;
 
@@ -35,17 +35,20 @@ int main(int argc, char** argv) {
 
     // Nothing on: no text, so the game's checksum stays its own.
     Check(FP("", "").empty(), "empty sections give no text");
-    Check(FP("resource_amount_rounding=0\0stockpile_arithmetic=0\0", "build_plan_keep=0\0colonizer_idle_days=0\0").empty(),
+    Check(FP("resource_amount_rounding=0\0stockpile_arithmetic=0\0", "build_plan_keep=0\0colonizer_idle_days=0\0")
+              .empty(),
           "settings at 0 give no text");
     Check(FP("military_power_display=1\0", "").empty(), "a display-only setting gives no text");
     Check(FP("stockpile_arithmetic=off\0", "").empty(), "a value that reads as 0 gives no text");
     // GetPrivateProfileSectionA returns '#' lines (and leaves out ';' ones): notes are not settings.
     Check(FP("#stockpile_arithmetic=1\0 # resource_multiplication = 1 \0; fleet_power_arithmetic=1\0",
-             "#colonizer_idle_days=180\0").empty(), "commented-out settings give no text");
+             "#colonizer_idle_days=180\0")
+              .empty(),
+          "commented-out settings give no text");
 
     // What is on, sorted, with its value.
     Check(FP("stockpile_arithmetic=1\0resource_amount_rounding=1\0military_power_display=1\0",
-               "colonizer_idle_days=180\0build_plan_keep=0\0") ==
+             "colonizer_idle_days=180\0build_plan_keep=0\0") ==
               "sef-rules-1;ai_fixes.colonizer_idle_days=180;numeric_fixes.resource_amount_rounding=1;"
               "numeric_fixes.stockpile_arithmetic=1",
           "settings that are on are listed in order");
@@ -55,7 +58,8 @@ int main(int argc, char** argv) {
     Check(FP("some_new_fix=1\0", "") == "sef-rules-1;numeric_fixes.some_new_fix=1", "an unknown key counts");
     // Windows reads the first of two entries with one key.
     Check(FP("stockpile_arithmetic=0\0stockpile_arithmetic=1\0", "").empty(), "a repeated key: the first entry counts");
-    Check(FP("stockpile_arithmetic=1\0stockpile_arithmetic=0\0", "") == "sef-rules-1;numeric_fixes.stockpile_arithmetic=1",
+    Check(FP("stockpile_arithmetic=1\0stockpile_arithmetic=0\0", "") ==
+              "sef-rules-1;numeric_fixes.stockpile_arithmetic=1",
           "a repeated key: the first entry counts (on)");
     std::vector<mpchecksum::Setting> storage;
     mpchecksum::AddScriptStorage(false, true, storage);
@@ -95,7 +99,8 @@ int main(int argc, char** argv) {
         expect("md5Update", static_cast<unsigned long long>(loc.md5Update - base), 0x1b554b0);
         expect("md5", loc.md5, 0x74);
         // The bytes the hook moves are the three register saves.
-        Check(memcmp(loc.finalize, "\x48\x89\x5C\x24\x08\x48\x89\x74\x24\x10\x48\x89\x7C\x24\x18", mpchecksum::kFinalizeStolenBytes) == 0,
+        Check(memcmp(loc.finalize, "\x48\x89\x5C\x24\x08\x48\x89\x74\x24\x10\x48\x89\x7C\x24\x18",
+                     mpchecksum::kFinalizeStolenBytes) == 0,
               "Finalize starts with three register saves");
     }
 

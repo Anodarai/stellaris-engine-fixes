@@ -1,18 +1,32 @@
 #include <cstdio>
 
-#include "../src/uishortcuts.h"
+#include "../src/interface/textselect.h"
+#include "../src/interface/uishortcuts.h"
+#include "../src/storage/storage_patterns.h"
 
 int main(int argc, char** argv) {
-    struct Input { std::string_view text; int expected; };
+    struct Input {
+        std::string_view text;
+        int expected;
+    };
     constexpr Input cases[] = {
-        {"0", 0}, {"12345", 12345}, {"2147483647", INT_MAX},
-        {"2147483648", -1}, {"9999999999999", -1}, {"", -1},
-        {"-1", -1}, {"1.5", -1}, {"1,000", -1}, {std::string_view("1\0" "2", 3), -1},
+        {"0", 0},
+        {"12345", 12345},
+        {"2147483647", INT_MAX},
+        {"2147483648", -1},
+        {"9999999999999", -1},
+        {"", -1},
+        {"-1", -1},
+        {"1.5", -1},
+        {"1,000", -1},
+        {std::string_view("1\0"
+                          "2",
+                          3),
+         -1},
     };
     for (const auto& input : cases) {
         int actual = -1;
-        if (uishortcuts::ParseTradeAmount(input.text, actual) != (input.expected >= 0) ||
-            actual != input.expected) {
+        if (uishortcuts::ParseTradeAmount(input.text, actual) != (input.expected >= 0) || actual != input.expected) {
             printf("FAIL parsing %.*s\n", static_cast<int>(input.text.size()), input.text.data());
             return 1;
         }
@@ -32,11 +46,10 @@ int main(int argc, char** argv) {
         locate::MultiplayerLocations multiplayer;
         std::string error;
         bool ok = uishortcuts::LocateTrade(img, trade, error) &&
-            uishortcuts::LocateTradeControls(img, trade, controls, error) &&
-            uishortcuts::LocateMarketAmountBackground(img, controls, marketBackground, error) &&
-            uishortcuts::LocateQueue(img, queue, error) &&
-            locate::LocateMultiplayer(img, multiplayer, error) &&
-            locate::FindOne(img, "PostCommandToSession", uishortcuts::kPostCommand, error);
+                  uishortcuts::LocateTradeControls(img, trade, controls, error) &&
+                  uishortcuts::LocateMarketAmountBackground(img, controls, marketBackground, error) &&
+                  uishortcuts::LocateQueue(img, queue, error) && locate::LocateMultiplayer(img, multiplayer, error) &&
+                  locate::FindOne(img, "PostCommandToSession", uishortcuts::kPostCommand, error);
         if (ok && queue.arrayToType != 0x34) {
             error = "unexpected queue array-to-type offset";
             ok = false;
@@ -50,9 +63,24 @@ int main(int argc, char** argv) {
             error = "unexpected trade control offsets";
             ok = false;
         }
+        // Text selection: the edit box handler, its vftable entry and the text buffer's selection calls.
+        textselect::Locations text;
+        if (ok && !textselect::Locate(img, text, error))
+            ok = false;
+        if (ok && text.slotCount != 2)
+            error = "expected CEditBox's and CNullEditBox's HandleInput entries", ok = false;
+        if (ok && (text.updateCursor == text.handleInput || text.setSelection == text.select))
+            error = "text selection targets coincide", ok = false;
+        if (ok)
+            printf("text selection: HandleInput %zx slot %zx Select %zx SetSelection %zx UpdateCursor %zx\n",
+                   static_cast<size_t>(text.handleInput - base),
+                   static_cast<size_t>(reinterpret_cast<uint8_t*>(text.handleInputSlots[0]) - base),
+                   static_cast<size_t>(text.select - base), static_cast<size_t>(text.setSelection - base),
+                   static_cast<size_t>(text.updateCursor - base));
         FreeLibrary(image);
         printf("%s %s%s%s\n", ok ? "PASS" : "FAIL", argv[i], ok ? "" : ": ", error.c_str());
-        if (!ok) return 1;
+        if (!ok)
+            return 1;
     }
     puts("PASS trade amount parsing");
 }

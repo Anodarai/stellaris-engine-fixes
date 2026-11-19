@@ -1,0 +1,108 @@
+# The look of stellaris-engine-fixes' starbase template panel (Starbase tab > Templates).
+#
+# The game never shows this window. The DLL looks up "sef_starbase_templates_skin" and clones one
+# of its button types for each control in the panel. Without this mod, or for a type left out
+# here, it clones the Starbase tab's Retrofit button, as before.
+#
+# The DLL sets every control's size and position, so the sizes below only matter if a type is
+# shown somewhere else. Use resizable sprites (corneredTileSpriteType) and keep
+# Orientation = "UPPER_LEFT". Every type must be a plain buttonType. Only vanilla sprite names
+# are used, so a UI mod that restyles them restyles this panel too.
+#
+# Roles:
+#   action      Save, Save global, New, Edit, Delete, Stop plan (relabelled in the editor)
+#   primary     Apply (in the editor: + Module slot)
+#   pager       < and >
+#   label       the page line and the status line: text with no frame
+#   row         list rows; left-aligned (the DLL indents the text past the icons). The selected
+#               template, or the picker's current entry, is tinted blue.
+#   icon        the module and building icons; the DLL replaces the sprite
+#   background  the panel behind the rows; does nothing when clicked. Leave it out for none.
+
+guiTypes = {
+	containerWindowType = {
+		name = "sef_starbase_templates_skin"
+		position = { x = 0 y = 0 }
+		size = { x = 0 y = 0 }
+
+		buttonType = {
+			name = "action"
+			quadTextureSprite = "GFX_tiling_button_standard"
+			size = { x = 160 y = 24 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			buttonFont = "cg_16b"
+			font = "cg_16b"
+			clicksound = interface
+			oversound = mouse_over
+		}
+
+		buttonType = {
+			name = "primary"
+			quadTextureSprite = "GFX_button_light"
+			size = { x = 160 y = 24 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			buttonFont = "cg_16b"
+			font = "cg_16b"
+			clicksound = "select_click"
+			oversound = mouse_over
+		}
+
+		buttonType = {
+			name = "pager"
+			quadTextureSprite = "GFX_tiling_button_standard_seethrough"
+			size = { x = 60 y = 24 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			buttonFont = "cg_16b"
+			font = "cg_16b"
+			clicksound = "tab_click"
+			oversound = mouse_over
+		}
+
+		buttonType = {
+			name = "label"
+			quadTextureSprite = "GFX_invisible"
+			size = { x = 200 y = 24 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			buttonFont = "cg_16b"
+			font = "cg_16b"
+			oversound = no_sound
+		}
+
+		buttonType = {
+			name = "row"
+			quadTextureSprite = "GFX_dark_area_frame_button"
+			size = { x = 340 y = 24 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			buttonFont = "cg_16b"
+			font = "cg_16b"
+			format = left
+			clicksound = "select_click"
+			oversound = mouse_over
+		}
+
+		buttonType = {
+			name = "icon"
+			quadTextureSprite = "GFX_invisible"
+			size = { x = 28 y = 28 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			clicksound = "select_click"
+			oversound = no_sound
+		}
+
+		buttonType = {
+			name = "background"
+			quadTextureSprite = "GFX_tiles_dark_area_cut_8"
+			size = { x = 340 y = 300 }
+			position = { x = 0 y = 0 }
+			Orientation = "UPPER_LEFT"
+			clicksound = no_sound
+			oversound = no_sound
+		}
+	}
+}

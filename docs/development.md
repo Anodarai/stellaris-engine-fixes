@@ -30,9 +30,10 @@ persistence or recorded-script execution is unavailable. Read the component mess
 log to see what actually loaded.
 
 The entry point and installation order are in [src/dllmain.cpp](../src/dllmain.cpp), with
-pattern definitions in [src/locate.h](../src/locate.h), allocator setup in
-[src/allocator.h](../src/allocator.h), and proxy exports in
-[src/exports_winmm.h](../src/exports_winmm.h).
+shared pattern helpers in [src/core/locate.h](../src/core/locate.h), allocator setup in
+[src/performance/allocator.h](../src/performance/allocator.h), and proxy exports in
+[src/core/exports_winmm.h](../src/core/exports_winmm.h). Feature-specific patterns live beside
+the code that uses them.
 
 ## Log format
 
@@ -65,7 +66,8 @@ on one physical line.
 
 `STATS` messages use space-separated `key=value` fields. Numeric units appear in the keys where
 applicable, such as `avg_us` and `wall_s`, and booleans use `0` or `1`. The writer is defined in
-[src/logging.h](../src/logging.h).
+[src/core/logging.h](../src/core/logging.h). Periodic counters and timings are collected in
+`build.bat dev` builds. The default release build still reports startup and `sef_bench` timings.
 
 ## Measuring performance
 
@@ -92,6 +94,9 @@ resolution, and frame settings consistent. Compare several runs that include the
 of daily and monthly work. Change the combat option between measurements, because switching
 it during a run produces a result containing both behaviors. Most other settings require a
 restart, as described in [Configuration](configuration.md).
+
+The [benchmark runner](../tools/bench/README.md) automates fresh-process A/B comparisons with
+local save files. See the [late-game benchmark results](../BENCHMARKS.md) for an example.
 
 ### Previously reported results
 
@@ -180,17 +185,13 @@ workflow replaces live gameplay testing, and multiplayer has not been tested at 
 
 | Path | Purpose |
 |---|---|
-| `src/dllmain.cpp` | DLL initialization, feature installation, game hooks, script integration, and benchmarking. |
-| `src/locate.h` | Byte patterns and the code that derives addresses and offsets from them. |
-| `src/allocator.h` | The memory allocator replacement installed before the game's C runtime starts. |
-| `src/logging.h` | The structured log-record writer. |
-| `src/uishortcuts.h` | Location and patch helpers for amount entry and queue shortcuts. |
-| `src/pathcache.h`, `src/natsort.h`, `src/incometarget.h` | File lookup caching, natural name comparison, and income-target arithmetic. |
-| `src/pdxstore.h`, `src/mpstore.h` | External script stores, serialization, and experimental multiplayer snapshot transport. |
-| `src/mpchecksum.h` | The settings fingerprint included in the game's checksum. |
-| `src/game.h` | Shared representations of game types. |
-| `src/exports_winmm.h` | WinMM exports forwarded to the Windows system DLL. |
-| `mods/` | Included Paradox-script mods, described in the [README](../README.md#included-mods). |
+| `src/dllmain.cpp` | DLL initialization, feature installation and shared hook helpers. |
+| `src/core/` | Pattern scanning, logging, shared game types and proxy exports. |
+| `src/interface/` | Shortcuts, view navigation, starbase templates and the ship design library. |
+| `src/performance/` | Memory allocation, outliner sorting, loading and simulation shortcuts, frame pacing and benchmarking. |
+| `src/ai/`, `src/numeric/` | Optional AI and overflow fixes. |
+| `src/storage/` | Script stores, experimental multiplayer synchronization and the settings checksum. |
+| `mods/` | Included game mods, described in the [README](../README.md#included-mods). |
 | `test/` | Native unit tests and executable-specific harnesses. |
 | `tools/validate_builds.py` | The local validation runner. |
 | `third_party/mimalloc/` | The bundled mimalloc library and its MIT license. |

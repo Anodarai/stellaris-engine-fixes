@@ -36,6 +36,15 @@ jobs:
             "build/mpstore_test.exe"
             "build/mpstore-runtime-test/mpstore_runtime_test.exe"
             "build/alloctest/alloc_host.exe"
+            "build/starbasetemplates_test.exe"
+            "build/starbasetemplates_panel_test.exe"
+            "build/starbasetemplates_editor_test.exe"
+            "build/starbasetemplates_share_test.exe"
+            "build/starbaseautoupgrade_test.exe"
+            "build/shipyardreinforce_test.exe"
+            "build/shipdesignlibrary_test.exe"
+            "build/starbasetemplates_commands_test.exe"
+            "build/starbasetemplates_reader_test.exe"
           )
 
           foreach ($test in $tests) {

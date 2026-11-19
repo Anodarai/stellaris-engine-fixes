@@ -10,26 +10,43 @@ alignas(8) uint8_t session[0xb00]{}, idler[0x200]{}, app[8]{};
 uint8_t* currentIdler = idler;
 std::vector<std::string> posted;
 void Check(bool ok, const char* name) {
-    if (!ok) { printf("FAIL: %s\n", name); ++failures; }
+    if (!ok) {
+        printf("FAIL: %s\n", name);
+        ++failures;
+    }
 }
-uint8_t* __fastcall AccessSession(uint8_t*) { return session; }
-void __fastcall OriginalChat(void*) { ++chatCalls; }
-void __fastcall OriginalSend(void*, void*, bool) { ++sendCalls; }
-void __fastcall OriginalInit(void*, void*, int, int) { ++initCalls; }
-struct FakeCommand { void* vtable; std::string text; };
+uint8_t* __fastcall AccessSession(uint8_t*) {
+    return session;
+}
+void __fastcall OriginalChat(void*) {
+    ++chatCalls;
+}
+void __fastcall OriginalSend(void*, void*, bool) {
+    ++sendCalls;
+}
+void __fastcall OriginalInit(void*, void*, int, int) {
+    ++initCalls;
+}
+struct FakeCommand {
+    void* vtable;
+    std::string text;
+};
 void* __fastcall DeleteCommand(void* p, unsigned) {
     static_cast<FakeCommand*>(p)->~FakeCommand();
     free(p);
     ++deletedCommands;
     return nullptr;
 }
-void* __fastcall NewCommand(size_t n) { return malloc(n); }
+void* __fastcall NewCommand(size_t n) {
+    return malloc(n);
+}
 void* __fastcall ConstructCommand(void* p, const game::String* text, int, int, int, bool, int) {
     static void* table[] = {reinterpret_cast<void*>(&DeleteCommand)};
-    return new(p) FakeCommand{table, std::string(text->data(), text->size)};
+    return new (p) FakeCommand{table, std::string(text->data(), text->size)};
 }
 bool __fastcall PostCommand(void*, void* p) {
-    if (!acceptPosts) return false;
+    if (!acceptPosts)
+        return false;
     posted.push_back(static_cast<FakeCommand*>(p)->text);
     DeleteCommand(p, 1);
     return true;
@@ -37,13 +54,16 @@ bool __fastcall PostCommand(void*, void* p) {
 void Deliver(const std::string& text, uint32_t sender = 1) {
     alignas(8) uint8_t command[0x68]{};
     memcpy(command + g_mpStore.commandSender, &sender, sizeof(sender));
-    // BorrowString uses strlen; explicitly restore size for embedded NUL regression cases.
-    game::String value = BorrowString(text.c_str());
+    // game::Borrow of a C string uses strlen; explicitly restore size for embedded NUL regression cases.
+    game::String value = game::Borrow(text.c_str());
     value.size = text.size();
     memcpy(command + g_mpStore.chatText, &value, sizeof(value));
     MpChatExecuteHook(command);
 }
-bool Ready() { MpRole role; return MpStoreReady(&role); }
+bool Ready() {
+    MpRole role;
+    return MpStoreReady(&role);
+}
 }
 
 int main() {
@@ -77,8 +97,10 @@ int main() {
     g_saveStore.Set("saved", "5");
     Check(MpPostSnapshot(session, "test", 0) && !Ready(), "posting does not make the host ready");
     const auto snapshot = posted;
-    for (const auto& m : snapshot) Deliver(m);
-    Check(Ready() && g_globalStore.Dirty() && g_saveStore.Get("saved"), "host echo activates storage and keeps pending writes");
+    for (const auto& m : snapshot)
+        Deliver(m);
+    Check(Ready() && g_globalStore.Dirty() && g_saveStore.Get("saved"),
+          "host echo activates storage and keeps pending writes");
     Deliver("ordinary chat");
     Check(chatCalls == 1, "ordinary chat reaches the original handler");
     Deliver(mpstore::kDisabled, 2);
@@ -90,14 +112,17 @@ int main() {
     g_globalStore.Set("local", "9");
     g_saveStore.Clear();
     g_saveStore.Set("localSave", "8");
-    for (const auto& m : snapshot) Deliver(m);
+    for (const auto& m : snapshot)
+        Deliver(m);
     Check(Ready() && g_mpGlobal.Get("host") && g_mpSave.Get("saved") && g_globalStore.Get("local") &&
-          g_saveStore.Get("localSave"), "client snapshot does not overwrite local stores");
+              g_saveStore.Get("localSave"),
+          "client snapshot does not overwrite local stores");
     StoreLoading("save games/not-a-real-save.sav");
     Check(g_mpSave.Get("saved") != nullptr, "client load preserves the received save store");
     Deliver(snapshot[0] + std::string("\0bad", 4));
     Check(!Ready(), "NUL inside a reserved message revokes readiness");
-    for (const auto& m : snapshot) Deliver(m);
+    for (const auto& m : snapshot)
+        Deliver(m);
     pdxstore::Store big, empty;
     big.Set("big", std::string(6000, 'x'));
     const auto chunks = mpstore::MakeMessages(mpstore::MakeSnapshot(big, empty));
@@ -105,24 +130,27 @@ int main() {
     Check(!Ready(), "first chunk revokes previous readiness");
     Deliver(chunks[2]);
     Check(!Ready(), "missing chunk never activates storage");
-    for (const auto& m : chunks) Deliver(m);
+    for (const auto& m : chunks)
+        Deliver(m);
     Check(Ready() && g_mpGlobal.Get("big"), "new complete transfer recovers after malformed traffic");
     g_recording.active = true;
     g_storeRuns.push_back({pdxstore::Which::Global, "old"});
     MpSessionInitHook(session, nullptr, 0, 0);
-    Check(initCalls == 1 && !Ready() && g_mpGlobal.Empty() && g_mpSave.Empty() && !g_recording.active && g_storeRuns.empty(),
+    Check(initCalls == 1 && !Ready() && g_mpGlobal.Empty() && g_mpSave.Empty() && !g_recording.active &&
+              g_storeRuns.empty(),
           "reusing a session address clears copies, readiness, recordings and queued effects");
 
     session[g_mpStore.hostFlag] = 1;
-    for (const auto& m : snapshot) Deliver(m);
+    for (const auto& m : snapshot)
+        Deliver(m);
     alignas(8) uint8_t transfer[0xd0]{};
     *reinterpret_cast<uint8_t**>(transfer + g_mpStore.transferSession) = session;
-    game::String name = BorrowString("OtherData");
+    game::String name = game::Borrow("OtherData");
     memcpy(transfer + g_mpStore.transferName, &name, sizeof(name));
     posted.clear();
     MpStartSendHook(transfer, nullptr, true);
     Check(sendCalls == 1 && posted.empty(), "unrelated file transfer does not resnapshot storage");
-    name = BorrowString("HotJoinData");
+    name = game::Borrow("HotJoinData");
     memcpy(transfer + g_mpStore.transferName, &name, sizeof(name));
     MpStartSendHook(transfer, nullptr, true);
     Check(sendCalls == 2 && posted.size() == 1 && posted[0] == mpstore::ResyncMessage(1) && Ready(),
@@ -135,23 +163,26 @@ int main() {
     Check(!Ready() && !posted.empty() && posted[0].rfind(mpstore::kPrefix, 0) == 0,
           "the host takes and posts its snapshot where the request executes");
     const auto resnapshot = posted;
-    for (const auto& m : resnapshot) Deliver(m);
+    for (const auto& m : resnapshot)
+        Deliver(m);
     Check(Ready() && g_globalStore.Get("beforeResync"), "a write made before the request survives the snapshot");
     session[g_mpStore.hostFlag] = 0;
     posted.clear();
     Deliver(request[0]);
     Check(!Ready() && posted.empty(), "a client stops storage at the request and posts nothing");
-    for (const auto& m : resnapshot) Deliver(m);
+    for (const auto& m : resnapshot)
+        Deliver(m);
     Check(Ready() && g_mpGlobal.Get("beforeResync"), "a client takes the snapshot posted at the request");
     session[g_mpStore.hostFlag] = 1;
-    for (const auto& m : resnapshot) Deliver(m);
+    for (const auto& m : resnapshot)
+        Deliver(m);
 
     // Two joins in flight: both requests execute before either snapshot. The first snapshot must not
     // reopen storage, or a write made then would be undone by the second, taken before it.
     posted.clear();
     MpStartSendHook(transfer, nullptr, true);
     MpStartSendHook(transfer, nullptr, true);
-    const auto requests = posted;  // requests 2 and 3
+    const auto requests = posted; // requests 2 and 3
     Check(requests.size() == 2 && requests[0] == mpstore::ResyncMessage(2) && requests[1] == mpstore::ResyncMessage(3),
           "each request has the next id");
     posted.clear();
@@ -161,26 +192,31 @@ int main() {
     Deliver(requests[1]);
     const auto second = posted;
     posted.clear();
-    for (const auto& m : first) Deliver(m);
+    for (const auto& m : first)
+        Deliver(m);
     Check(!Ready(), "the earlier request's snapshot does not reopen storage once a later request executed");
-    for (const auto& m : second) Deliver(m);
+    for (const auto& m : second)
+        Deliver(m);
     Check(Ready(), "the latest request's snapshot reopens storage");
     // A joiner that saw only the later request agrees: closed after the first snapshot, open after the second.
     session[g_mpStore.hostFlag] = 0;
     MpSessionInitHook(session, nullptr, 0, 0);
     Deliver(requests[1]);
-    for (const auto& m : first) Deliver(m);
+    for (const auto& m : first)
+        Deliver(m);
     Check(!Ready(), "a joiner that missed the earlier request stays closed for its snapshot too");
-    for (const auto& m : second) Deliver(m);
+    for (const auto& m : second)
+        Deliver(m);
     Check(Ready() && g_mpGlobal.Get("beforeResync"), "and opens with the latest snapshot");
     session[g_mpStore.hostFlag] = 1;
     MpSessionInitHook(session, nullptr, 0, 0);
-    for (const auto& m : second) Deliver(m);
+    for (const auto& m : second)
+        Deliver(m);
 
     // The session refuses the snapshot where the request executes: the host posts it again later.
     posted.clear();
     MpStartSendHook(transfer, nullptr, true);
-    const auto retryRequest = posted;  // request 4
+    const auto retryRequest = posted; // request 4
     posted.clear();
     acceptPosts = false;
     Deliver(retryRequest[0]);
@@ -198,7 +234,8 @@ int main() {
     g_mpRetryAt = 0;
     MpRetrySnapshot();
     Check(!posted.empty() && !g_mpRetryPending, "posted again from the frame once due");
-    for (const auto& m : posted) Deliver(m);
+    for (const auto& m : posted)
+        Deliver(m);
     Check(Ready() && g_globalStore.Get("beforeResync"), "the reposted snapshot reopens storage");
 
     // The session lookup fails while store messages execute (the idler has no application here, so
@@ -208,7 +245,7 @@ int main() {
     auto findSession = [] { *reinterpret_cast<uint8_t**>(idler + g_mpStore.idlerApp) = app; };
     posted.clear();
     MpStartSendHook(transfer, nullptr, true);
-    const auto lostRequest = posted;  // request 5
+    const auto lostRequest = posted; // request 5
     Check(lostRequest.size() == 1 && lostRequest[0] == mpstore::ResyncMessage(5), "request 5 posted");
     posted.clear();
     loseSession();
@@ -225,7 +262,8 @@ int main() {
     const auto lostSnapshot = posted;
     posted.clear();
     loseSession();
-    for (const auto& m : lostSnapshot) Deliver(m);
+    for (const auto& m : lostSnapshot)
+        Deliver(m);
     Check(!Ready() && g_mpUnapplied.pending.load(), "a snapshot completed without the session is kept");
     findSession();
     Check(Ready() && !g_mpUnapplied.pending.load() && g_globalStore.Get("beforeResync"),
@@ -240,16 +278,19 @@ int main() {
     Check(posted.empty() && !g_mpRetryPending, "and drops the retry once the session shows it");
     g_mpGlobal.Clear();
     loseSession();
-    for (const auto& m : lostSnapshot) Deliver(m);
+    for (const auto& m : lostSnapshot)
+        Deliver(m);
     findSession();
     Check(Ready() && g_mpGlobal.Get("beforeResync"), "a client opens storage with the snapshot it kept");
     loseSession();
-    for (const auto& m : lostSnapshot) Deliver(m);
-    Deliver(chunks[0]);  // another transfer's first piece revokes readiness on every machine
+    for (const auto& m : lostSnapshot)
+        Deliver(m);
+    Deliver(chunks[0]); // another transfer's first piece revokes readiness on every machine
     findSession();
     Check(!Ready() && !g_mpUnapplied.pending.load(), "a later store message drops the kept snapshot");
     session[g_mpStore.hostFlag] = 1;
-    for (const auto& m : lostSnapshot) Deliver(m);
+    for (const auto& m : lostSnapshot)
+        Deliver(m);
     Check(Ready(), "the host is ready again");
 
     posted.clear();
@@ -261,7 +302,8 @@ int main() {
     acceptPosts = true;
     g_globalStore.Set("huge", std::string(mpstore::kMaxSnapshot, 'x'));
     posted.clear();
-    Check(MpPostSnapshot(session, "oversize", g_mpResyncPosted) && posted.size() == 1 && posted[0] == mpstore::kDisabled && Ready(),
+    Check(MpPostSnapshot(session, "oversize", g_mpResyncPosted) && posted.size() == 1 &&
+              posted[0] == mpstore::kDisabled && Ready(),
           "oversize snapshot posts an ordered disable without locally changing readiness");
     Deliver(posted[0]);
     Check(!Ready(), "host and clients disable at the command boundary");
@@ -269,8 +311,67 @@ int main() {
     g_saveStore.Set("previousGame", "1");
     posted.clear();
     MpPostSnapshot(session, "new game", g_mpResyncPosted, true);
-    for (const auto& m : posted) Deliver(m);
+    for (const auto& m : posted)
+        Deliver(m);
     Check(Ready() && g_saveStore.Empty(), "new game snapshot does not carry the previous save store");
+    // Template persistence uses the same actual callbacks and sidecar Store objects.
+    idler[g_mp.flag] = 0;
+    g_starbaseTemplatesOn = true;
+    starbasetemplates::State base;
+    base.id = 0x03000001;
+    base.owner = 4;
+    base.built = {"starbase_level_starhold", {"anchorage", "anchorage"}, {"naval_logistics_office"}};
+    Check(g_starbaseGlobalLibrary.Save("Naval base", base), "create global template");
+    auto localBase = base;
+    localBase.built.modules[0] = "shipyard";
+    Check(g_starbaseLocalLibrary.Save("Naval base", localBase) && g_starbaseLocalLibrary.Save("Local only", localBase),
+          "create save-specific templates");
+    RebuildStarbaseLibrary();
+    Check(g_starbaseTemplates.library.at("Naval base").modules[0] == "shipyard" &&
+              g_starbaseTemplates.Apply("Naval base", base),
+          "create saved template and per-save job");
+    g_saveStore.Set("unrelated", "keep");
+    Check(CaptureStarbaseTemplates(), "capture template payloads into sidecar stores");
+    const auto captured = g_saveStore;
+    starbasetemplates::Controller diskGlobal, diskLocal;
+    Check(diskGlobal.Deserialize(*g_globalStore.Get(kStarbaseLibraryKey), true) &&
+              diskLocal.Deserialize(*g_saveStore.Get(kStarbaseLibraryKey), true) &&
+              diskGlobal.library.at("Naval base").modules[0] == "anchorage" &&
+              !diskGlobal.library.count("Local only") && diskLocal.library.count("Local only"),
+          "global and save-specific libraries persist separately");
+    idler[g_mp.flag] = 1;
+    RestoreStarbaseTemplateJobs();
+    Check(g_starbaseTemplates.jobs.empty() && CaptureStarbaseTemplates() && g_saveStore.Get(kStarbaseJobsKey),
+          "multiplayer does not restore or rewrite single-player plans");
+    idler[g_mp.flag] = 0;
+    g_starbaseTemplates.Stop(base.id);
+    g_starbaseTemplates.inFlight[base.id] = {starbasetemplates::Kind::Upgrade, 0, "starbase_level_citadel"};
+    RestoreStarbaseTemplateJobs();
+    Check(g_starbaseTemplates.jobs.count(base.id) == 1 && g_starbaseTemplates.inFlight.empty(),
+          "restore per-save job and discard old-session posts");
+    g_starbaseTemplates.Stop(base.id);
+    Check(CaptureStarbaseTemplates() && !g_saveStore.Get(kStarbaseJobsKey) && g_saveStore.Get("unrelated"),
+          "stopping last job clears only the plan payload");
+    g_saveStore = captured;
+    RestoreStarbaseTemplateJobs();
+    StoreNewGame();
+    Check(g_starbaseTemplates.jobs.empty() && !g_starbaseTemplates.library.count("Local only") &&
+              g_starbaseTemplates.library.at("Naval base").modules[0] == "anchorage",
+          "new game removes local library and exposes the unchanged global template");
+    g_saveStore = captured;
+    RestoreStarbaseTemplateJobs();
+    Check(g_starbaseTemplates.library.count("Local only") &&
+              g_starbaseTemplates.library.at("Naval base").modules[0] == "shipyard" &&
+              g_starbaseTemplates.jobs.at(base.id).target.modules[0] == "shipyard",
+          "loading restores local overrides and immutable active targets");
+    g_saveStore.Clear();
+    RestoreStarbaseTemplateJobs();
+    Check(g_starbaseLocalLibrary.library.empty() && g_starbaseTemplates.library.count("Naval base"),
+          "older saves without a local library still see existing global templates");
+    g_saveStore.Set(kStarbaseJobsKey, "malformed");
+    RestoreStarbaseTemplateJobs();
+    Check(!g_starbaseTemplatesOn && g_saveStore.Get(kStarbaseJobsKey) && g_starbaseTemplates.jobs.empty(),
+          "malformed plan disables automation and preserves source data");
     printf(failures ? "mpstore_runtime_test: %d FAILED\n" : "mpstore_runtime_test: all passed\n", failures);
     return failures ? 1 : 0;
 }

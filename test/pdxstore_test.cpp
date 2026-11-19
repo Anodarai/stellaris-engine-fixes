@@ -4,17 +4,17 @@
 #include <cstdio>
 #include <string>
 
-#include "../src/pdxstore.h"
+#include "../src/storage/pdxstore.h"
 
 using namespace pdxstore;
 
 static int g_failures = 0;
-#define CHECK(cond)                                                       \
-    do {                                                                  \
-        if (!(cond)) {                                                    \
-            printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);        \
-            ++g_failures;                                                 \
-        }                                                                 \
+#define CHECK(cond)                                                                                                    \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                                     \
+            ++g_failures;                                                                                              \
+        }                                                                                                              \
     } while (0)
 
 static void Numbers() {
@@ -22,7 +22,7 @@ static void Numbers() {
     CHECK(ParseFixed("12", &v) && v == 1200000);
     CHECK(ParseFixed("-0.5", &v) && v == -50000);
     CHECK(ParseFixed("+3.14159", &v) && v == 314159);
-    CHECK(ParseFixed("1.234567", &v) && v == 123456);  // past five decimals: cut
+    CHECK(ParseFixed("1.234567", &v) && v == 123456); // past five decimals: cut
     CHECK(ParseFixed("0.00001", &v) && v == 1);
     CHECK(ParseFixed("7.", &v) && v == 700000);
     CHECK(ParseFixed(".5", &v) && v == 50000);
@@ -39,7 +39,8 @@ static void Numbers() {
     CHECK(FormatFixed(INT64_MIN) == "-92233720368547.75808");
     CHECK(!ParseFixed("92233720368547.75808", &v));
     CHECK(!ParseFixed("-92233720368547.75809", &v));
-    for (int64_t x : {int64_t(0), int64_t(1), int64_t(-1), int64_t(123456789), int64_t(-100000), INT64_MIN, INT64_MAX}) {
+    for (int64_t x :
+         {int64_t(0), int64_t(1), int64_t(-1), int64_t(123456789), int64_t(-100000), INT64_MIN, INT64_MAX}) {
         CHECK(ParseFixed(FormatFixed(x), &v) && v == x);
     }
 }
@@ -49,8 +50,8 @@ static void Commands() {
     std::string e;
     CHECK(ParseCommand("global.set my_key = my_var", c, e) && c.op == Op::Set && c.store == Which::Global &&
           c.key == "my_key" && c.variable == "my_var" && !c.number);
-    CHECK(ParseCommand("  save.set  my_var  ", c, e) && c.op == Op::Set && c.store == Which::Save && c.key == "my_var" &&
-          c.variable == "my_var");
+    CHECK(ParseCommand("  save.set  my_var  ", c, e) && c.op == Op::Set && c.store == Which::Save &&
+          c.key == "my_var" && c.variable == "my_var");
     CHECK(ParseCommand("global.set k = -2.5", c, e) && c.number && c.value == -250000 && c.variable.empty());
     CHECK(ParseCommand("global.get v = k", c, e) && c.op == Op::Get && c.variable == "v" && c.key == "k");
     CHECK(ParseCommand("save.get v", c, e) && c.op == Op::Get && c.variable == "v" && c.key == "v");
@@ -106,13 +107,14 @@ static void Format() {
     Store limit;
     CHECK(!limit.Set("k", std::string(kMaxValue + 1, 'x')));
     CHECK(limit.Set("k", std::string(kMaxValue, 'x')));
-    for (int i = 0; i < 14; ++i) CHECK(limit.Set("k" + std::to_string(i), std::string(kMaxValue, 'x')));
-    CHECK(!limit.Set("over", std::string(kMaxValue, 'x')));  // 16 MB of values and the keys pass 16 MB
+    for (int i = 0; i < 14; ++i)
+        CHECK(limit.Set("k" + std::to_string(i), std::string(kMaxValue, 'x')));
+    CHECK(!limit.Set("over", std::string(kMaxValue, 'x'))); // 16 MB of values and the keys pass 16 MB
     CHECK(limit.Remove("k"));
     CHECK(!limit.Remove("k"));
     CHECK(limit.Set("over", std::string(kMaxValue, 'x')));
     limit.SetClean();
-    CHECK(limit.Set("over", std::string(kMaxValue, 'x')) && !limit.Dirty());  // the same value: no change
+    CHECK(limit.Set("over", std::string(kMaxValue, 'x')) && !limit.Dirty()); // the same value: no change
 }
 
 static void Paths() {
@@ -136,16 +138,16 @@ static void Files() {
     std::wstring file = SaveFile(dir, "folder/name.sav");
     Store s, t;
     std::string e;
-    CHECK(ReadStore(file, t, e) && t.Empty());  // missing: empty
+    CHECK(ReadStore(file, t, e) && t.Empty()); // missing: empty
     s.Set("giga_preset", "remove_all_menu_flags = yes\nset_global_flag = giga_x");
     s.Set("count", "3");
     CHECK(WriteStore(file, s) && !s.Dirty());
     CHECK(ReadStore(file, t, e) && t.Values() == s.Values());
     CHECK(GetFileAttributesW((file + L".tmp").c_str()) == INVALID_FILE_ATTRIBUTES);
     s.Clear();
-    CHECK(WriteStore(file, s));  // empty: the file goes
+    CHECK(WriteStore(file, s)); // empty: the file goes
     CHECK(GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES);
-    CHECK(WriteStore(file, s));  // and again, with nothing to delete
+    CHECK(WriteStore(file, s)); // and again, with nothing to delete
     std::string bad = "k = broken\n";
     CHECK(WriteFileText(file, bad));
     t.Set("x", "y");

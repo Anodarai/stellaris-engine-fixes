@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <random>
 
-#include "../src/incometarget.h"
+#include "../src/ai/incometarget.h"
 
 namespace {
 
@@ -10,14 +10,19 @@ namespace {
 int64_t GameRounds(const int64_t* t0, const int64_t* r, const int64_t* target, int n, int64_t done, int64_t limit,
                    bool addsSomething) {
     int64_t total[8];
-    for (int i = 0; i < n; ++i) total[i] = t0[i] + done * r[i];
+    for (int i = 0; i < n; ++i)
+        total[i] = t0[i] + done * r[i];
     for (int64_t rounds = done;; ++rounds) {
         for (int i = 0; i < n; ++i) {
-            if ((target[i] >= 0 || total[i] > 0) && target[i] < total[i]) return rounds;
+            if ((target[i] >= 0 || total[i] > 0) && target[i] < total[i])
+                return rounds;
         }
-        if (n == 0 || !addsSomething) return rounds;
-        if (rounds >= limit) return -1;
-        for (int i = 0; i < n; ++i) total[i] += r[i];
+        if (n == 0 || !addsSomething)
+            return rounds;
+        if (rounds >= limit)
+            return -1;
+        for (int i = 0; i < n; ++i)
+            total[i] += r[i];
     }
 }
 
@@ -28,22 +33,27 @@ void Check(const char* what, const int64_t* t0, const int64_t* r, const int64_t*
     int64_t ours = income::Rounds(t0, r, target, n, done);
     // Ours may give up (-1) where the game runs long; when it answers, it must be the game's answer.
     if (ours >= 0 && ours != game && (game >= 0 || ours < 200000)) {
-        if (++g_failures <= 10) printf("FAIL %s: game %lld, ours %lld\n", what, (long long)game, (long long)ours);
+        if (++g_failures <= 10)
+            printf("FAIL %s: game %lld, ours %lld\n", what, (long long)game, (long long)ours);
     }
     if (ours < 0 && game >= 0 && game > done) {
         // Only acceptable when the game would have left before `done` rounds ran (not this loop).
         int64_t fromStart = GameRounds(t0, r, target, n, 0, 200000, true);
         if (fromStart > done || fromStart < 0) {
-            if (++g_failures <= 10) printf("FAIL %s: game %lld, ours gave up\n", what, (long long)game);
+            if (++g_failures <= 10)
+                printf("FAIL %s: game %lld, ours gave up\n", what, (long long)game);
         }
     }
 }
 
-}  // namespace
+} // namespace
 
 int main() {
     auto require = [](bool ok, const char* what) {
-        if (!ok) { printf("FAIL %s\n", what); ++g_failures; }
+        if (!ok) {
+            printf("FAIL %s\n", what);
+            ++g_failures;
+        }
     };
     {
         int64_t value = 17;
@@ -66,9 +76,11 @@ int main() {
         require(income::Rounds(t0, r, target, 2, 1) == 3, "full-width distance with another stopping resource");
         require(income::Rounds(t0, r, target, 1, 1) == -1, "counter cannot reach full-width distance");
         require(income::Rounds(t0, r, target, 2, -1) == -1, "invalid observed round count");
-        t0[0] = INT64_MIN + 1; r[0] = -1;
+        t0[0] = INT64_MIN + 1;
+        r[0] = -1;
         require(income::Rounds(t0, r, target, 2, 2) == -1, "observed negative resource already overflowed");
-        t0[0] = INT64_MAX - 1; r[0] = 1;
+        t0[0] = INT64_MAX - 1;
+        r[0] = 1;
         require(income::Rounds(t0, r, target, 2, 2) == -1, "observed positive resource already overflowed");
     }
     // The case seen in the game: one resource grows by 500000 a round towards 6.37e14.
@@ -79,7 +91,8 @@ int main() {
         int64_t k = income::Rounds(t0, r, target, 3, 1);
         int64_t want = (637025288226593 - t0[2]) / 500000 + 1;
         printf("seen case: %lld rounds (want %lld)\n", (long long)k, (long long)want);
-        if (k != want) ++g_failures;
+        if (k != want)
+            ++g_failures;
     }
     std::mt19937_64 rng(12345);
     auto pick = [&](int64_t lo, int64_t hi) { return std::uniform_int_distribution<int64_t>(lo, hi)(rng); };
@@ -94,7 +107,8 @@ int main() {
         int64_t done = pick(1, 3);
         // Only states the game reaches: it didn't leave in the first `done` rounds.
         int64_t first = GameRounds(t0, r, target, n, 0, done, true);
-        if (first >= 0 && first < done) continue;
+        if (first >= 0 && first < done)
+            continue;
         Check("random", t0, r, target, n, done);
     }
     // Overflow: a total that would wrap must give up, not answer.

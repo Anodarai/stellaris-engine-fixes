@@ -1,4 +1,4 @@
-// Runs locate.h against stellaris.exe mapped as an image (no code runs) and checks the results
+// Runs the patterns (core/locate.h and each feature's *_patterns.h) against stellaris.exe mapped as an image (no code runs) and checks the results
 // against what Ghidra found for the build analysed in re/fleet_outliner_sort.md.
 // Usage: locate_test.exe <path to stellaris.exe> [--expect-known]
 //   --expect-known  also compare with the addresses of SHA-256 400DF27C...7A83
@@ -7,22 +7,84 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../src/aibossthreat.h"
-#include "../src/aifleettrace.h"
-#include "../src/aiwarguard.h"
-#include "../src/locate.h"
+#include "../src/ai/aibossthreat.h"
+#include "../src/ai/aifleettrace.h"
+#include "../src/ai/aiwarguard.h"
+#include "../src/ai/ai_patterns.h"
+#include "../src/core/locate.h"
+#include "../src/interface/uinavigation_runtime.h"
+#include "../src/performance/heap_patterns.h"
+#include "../src/performance/outliner_patterns.h"
+#include "../src/performance/speed_patterns.h"
+#include "../src/performance/tick_patterns.h"
+#include "../src/storage/storage_patterns.h"
+
+static bool TestNavigationPlacement() {
+    using namespace uinavigation;
+    alignas(8) uint8_t parent[0x690]{};
+    alignas(8) uint8_t close[0x2b0]{}, focus[0x2b0]{}, modAction[0x2b0]{}, flag[0x2b0]{};
+    uint8_t* buttons[] = {close, focus, modAction, flag};
+    game::String names[] = {Text("close"), Text("focus"), Text("giga_mega_highlight_on"), Text("flag")};
+    Field<uint8_t**>(parent, 0x668) = buttons;
+    Field<int>(parent, 0x674) = 4;
+    Field<game::String*>(parent, 0x680) = names;
+    Field<int>(parent, 0x68c) = 4;
+    Field<Point>(close, 0x1a8) = {-45, 7};
+    Field<Point>(focus, 0x1a8) = {-80, 7};
+    Field<Point>(modAction, 0x1a8) = {-185, 7};
+    Field<Point>(flag, 0x1a8) = {-198, 7};
+    Field<int32_t>(close, 0x2a0) = 1;
+    Field<int32_t>(focus, 0x2a0) = 1;
+    Field<int32_t>(modAction, 0x2a0) = 1;
+    Field<Point>(close, 0x2a4) = {660, 60};
+
+    ArrowPlacement placement{};
+    return LocateArrowPlacement(parent, placement) && placement.previous.x == -257 && placement.next.x == -221 &&
+           placement.next.y == 7 && placement.orientation == 1 && placement.windowSize.x == 660;
+}
+
+static bool TestContactsReturn() {
+    using namespace uinavigation;
+    struct ViewState {
+        uintptr_t* methods;
+        bool shown;
+        bool fromContacts;
+    };
+    uintptr_t diplomacyMethods[15]{}, contactsMethods[15]{};
+    diplomacyMethods[0x38 / 8] = reinterpret_cast<uintptr_t>(+[](uint8_t* object) {
+        auto& state = *reinterpret_cast<ViewState*>(object);
+        state.shown = false;
+        state.fromContacts = false;
+    });
+    contactsMethods[0x70 / 8] =
+        reinterpret_cast<uintptr_t>(+[](uint8_t* object) { return reinterpret_cast<ViewState*>(object)->shown; });
+    contactsMethods[0x40 / 8] = reinterpret_cast<uintptr_t>(
+        +[](uint8_t* object, bool show) { reinterpret_cast<ViewState*>(object)->shown = show; });
+    ViewState diplomacy{diplomacyMethods, true, false};
+    ViewState contacts{contactsMethods, false, false};
+    auto* contactsPtr = reinterpret_cast<uint8_t*>(&contacts);
+    auto* idler = reinterpret_cast<uint8_t*>(&contactsPtr);
+    ContactsReturn locations{nullptr, &idler, offsetof(ViewState, fromContacts), 0};
+    auto* view = reinterpret_cast<uint8_t*>(&diplomacy);
+    CloseDiplomacyFromButton(locations, view);
+    if (diplomacy.shown || contacts.shown)
+        return false;
+    diplomacy.shown = diplomacy.fromContacts = true;
+    CloseDiplomacyFromButton(locations, view);
+    return !diplomacy.shown && contacts.shown;
+}
 
 static bool TestBossThreatStub(aibossthreat::Locations found) {
     constexpr uint8_t setup[] = {
-        0x53, 0x41, 0x56,  // push rbx; push r14
-        0x48, 0x8B, 0xD9,  // mov rbx, rcx
-        0x48, 0x8B, 0xC2,  // mov rax, rdx
-        0x4D, 0x8B, 0xF0,  // mov r14, r8
+        0x53, 0x41, 0x56, // push rbx; push r14
+        0x48, 0x8B, 0xD9, // mov rbx, rcx
+        0x48, 0x8B, 0xC2, // mov rax, rdx
+        0x4D, 0x8B, 0xF0, // mov r14, r8
     };
-    constexpr uint8_t finish[] = {0x41, 0x5E, 0x5B, 0xC3};  // pop r14; pop rbx; ret
-    auto buffer = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_RESERVE | MEM_COMMIT,
-                                                      PAGE_EXECUTE_READWRITE));
-    if (!buffer) return false;
+    constexpr uint8_t finish[] = {0x41, 0x5E, 0x5B, 0xC3}; // pop r14; pop rbx; ret
+    auto buffer = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    if (!buffer)
+        return false;
     auto end = buffer + 64 - sizeof(finish);
     found.resume = end;
     const auto code = aibossthreat::ThreatStub(found);
@@ -36,7 +98,11 @@ static bool TestBossThreatStub(aibossthreat::Locations found) {
     std::vector<int64_t> fleet(found.cachedPower / sizeof(int64_t) + 1);
     constexpr int64_t floor = 40000LL << 15;
     constexpr int64_t avatar = 119032LL << 15;
-    const struct { int64_t cached; int64_t minimum; int64_t expected; } cases[] = {
+    const struct {
+        int64_t cached;
+        int64_t minimum;
+        int64_t expected;
+    } cases[] = {
         {0, floor, floor},
         {-1, floor, floor},
         {floor, floor, floor},
@@ -49,7 +115,8 @@ static bool TestBossThreatStub(aibossthreat::Locations found) {
         fleet.back() = test.cached;
         int64_t result = -1;
         estimate(fleet.data(), test.minimum, &result);
-        if (result != test.expected) ok = false;
+        if (result != test.expected)
+            ok = false;
     }
     VirtualFree(buffer, 0, MEM_RELEASE);
     return ok;
@@ -57,11 +124,11 @@ static bool TestBossThreatStub(aibossthreat::Locations found) {
 
 static bool TestWarRefreshStub(const aiwarguard::Locations& war) {
     // Match the native flag write's inputs: RDI points to the AI, EAX is the negated bool.
-    constexpr uint8_t setup[] = {0x57, 0x48, 0x8B, 0xF9, 0x8B, 0xC2};  // push rdi; mov rdi, rcx; mov eax, edx
-    constexpr uint8_t finish[] = {0x5F, 0xC3};                          // pop rdi; ret
-    auto buffer = static_cast<uint8_t*>(VirtualAlloc(nullptr, 128, MEM_RESERVE | MEM_COMMIT,
-                                                      PAGE_EXECUTE_READWRITE));
-    if (!buffer) return false;
+    constexpr uint8_t setup[] = {0x57, 0x48, 0x8B, 0xF9, 0x8B, 0xC2}; // push rdi; mov rdi, rcx; mov eax, edx
+    constexpr uint8_t finish[] = {0x5F, 0xC3};                        // pop rdi; ret
+    auto buffer = static_cast<uint8_t*>(VirtualAlloc(nullptr, 128, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    if (!buffer)
+        return false;
     auto end = buffer + 126;
     auto code = aiwarguard::RefreshStub(war, end);
     memcpy(buffer, setup, sizeof(setup));
@@ -76,7 +143,11 @@ static bool TestWarRefreshStub(const aiwarguard::Locations& war) {
     constexpr uint32_t other = 0x400;
     constexpr uint32_t preparing = aiwarguard::kPreparing;
     constexpr uint32_t dirty = aiwarguard::kNeedStrategicWarData;
-    const struct { uint32_t before; int prepare; uint32_t after; } cases[] = {
+    const struct {
+        uint32_t before;
+        int prepare;
+        uint32_t after;
+    } cases[] = {
         {other, 0, other},
         {other, -1, other | preparing},
         {other | preparing, -1, other | preparing},
@@ -88,7 +159,8 @@ static bool TestWarRefreshStub(const aiwarguard::Locations& war) {
     for (const auto& test : cases) {
         flags = test.before;
         set(ai.data(), test.prepare);
-        if (flags != test.after) ok = false;
+        if (flags != test.after)
+            ok = false;
     }
     VirtualFree(buffer, 0, MEM_RELEASE);
     return ok;
@@ -99,7 +171,7 @@ int main(int argc, char** argv) {
         printf("usage: locate_test <stellaris.exe> [--expect-known]\n");
         return 2;
     }
-    setvbuf(stdout, nullptr, _IONBF, 0);  // keep what was printed if a lookup crashes
+    setvbuf(stdout, nullptr, _IONBF, 0); // keep what was printed if a lookup crashes
     bool expectKnown = argc > 2 && strcmp(argv[2], "--expect-known") == 0;
 
     HMODULE mod = LoadLibraryExA(argv[1], nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
@@ -131,6 +203,50 @@ int main(int argc, char** argv) {
             ++failures;
         }
     };
+    auto* contactsReset = uinavigation::LocateContactsScrollReset(img, error);
+    if (!contactsReset) {
+        printf("FAIL Contacts scroll: %s\n", error.c_str());
+        ++failures;
+    } else {
+        expect("Contacts scroll reset", rva(contactsReset), 0xff030f);
+    }
+    uinavigation::ContactsReturn contactsReturn;
+    if (!uinavigation::LocateContactsReturn(img, contactsReturn, error)) {
+        printf("FAIL Contacts return: %s\n", error.c_str());
+        ++failures;
+    } else {
+        expect("Diplomacy close binding", rva(contactsReturn.closeCallbackLoad), 0x116e0b5);
+        if (contactsReturn.fromContacts != 0x1da9 || contactsReturn.contactsView != 0xd80) {
+            printf("FAIL Contacts return layout\n");
+            ++failures;
+        }
+    }
+    if (!TestNavigationPlacement()) {
+        printf("FAIL navigation arrow placement\n");
+        ++failures;
+    }
+    if (!TestContactsReturn()) {
+        printf("FAIL explicit Diplomacy close and Contacts return\n");
+        ++failures;
+    }
+    uinavigation::Locations navigation;
+    if (!uinavigation::Locate(img, navigation, error)) {
+        printf("FAIL view navigation: %s\n", error.c_str());
+        ++failures;
+    } else {
+        expect("CGuiView::Reload", rva(navigation.reload), 0x1a7f7b0);
+        expect("Diplomacy::Show", rva(navigation.showDiplomacy), 0x11719b0);
+        const std::vector<uint32_t> ids{4, 8, 2};
+        using uinavigation::Adjacent;
+        if (navigation.selectionCount != 0xa8c || navigation.fleetClass != 0x1280 || navigation.megaTarget != 0x4b0 ||
+            navigation.megaTriggerCount != 0x23fc || navigation.contactsView != 0xd80 || navigation.countryId != 0x20 ||
+            navigation.diplomacyTarget != 0x698 || Adjacent(ids, 2, true) != 4 || Adjacent(ids, 4, false) != 2 ||
+            Adjacent(ids, 8, true) != 2 || Adjacent(ids, 10, false) != 2 || Adjacent({}, 8, true) != UINT32_MAX) {
+            printf("FAIL view navigation layout or adjacent selection\n");
+            ++failures;
+        }
+    }
+
     expect("compare", rva(loc.compare), 0x14b3270);
     expect("fleetGroupUpdate", rva(loc.fleetGroupUpdate), 0x14b34c0);
     expect("fleetGroupVtblSlot", rva(loc.fleetGroupVtblSlot), 0x2455490);
@@ -150,7 +266,8 @@ int main(int argc, char** argv) {
     if (expectKnown) {
         bool thunk = locate::IsFleetNameThunk(str, base + 0x1af370);
         printf("  fleet name thunk at 0x1AF370 %s\n", thunk ? "recognized" : "NOT recognized");
-        if (!thunk) ++failures;
+        if (!thunk)
+            ++failures;
     }
 
     locate::MegaLocations mega;
@@ -189,6 +306,13 @@ int main(int argc, char** argv) {
     expect("stateTick", bench.stateTick, 0x8);
     expect("stateDate", bench.stateDate, 0xc0);
     expect("RenderFrame", rva(bench.renderFrame), 0x24bdd0);
+    locate::BenchControls controls;
+    if (!locate::LocateBenchControls(img, bench, controls, error)) {
+        printf("FAIL benchmark controls: %s\n", error.c_str());
+        return 1;
+    }
+    expect("SetGameSpeed", rva(controls.setSpeed), 0x934c50);
+    expect("SetPaused", rva(controls.setPaused), 0x935340);
     expect("g_bFrameSmoothing", rva(bench.frameSmoothing), 0x2807830);
     expect("NUM_COMMANDS_PER_TURN", rva(bench.commandsPerTurn), 0x31157d8);
     expect("g_nTicksPerTurn", rva(bench.ticksPerTurn), 0x2807834);
@@ -364,11 +488,12 @@ int main(int argc, char** argv) {
         printf("FAIL AI fleet trace: signatures or call targets changed\n");
         ++failures;
     } else {
-        printf("located the AI fleet trace: group target/system/mission/fleets/country +0x%zx/+0x%zx/+0x%zx/+0x%zx/+0x%zx, "
-               "available +0x%zx, ids +0x%zx/+0x%zx, strategy list %u (+0x%zx/+0x%zx, target +0x%zx)\n",
-               fleetTrace.groupTarget, fleetTrace.groupSystem, fleetTrace.groupMission, fleetTrace.groupFleetCount,
-               fleetTrace.groupCountry, fleetTrace.availableCount, fleetTrace.systemId, fleetTrace.countryId,
-               fleetTrace.hostileList, fleetTrace.strategiesEntries, fleetTrace.strategiesCount, fleetTrace.entryTarget);
+        printf(
+            "located the AI fleet trace: group target/system/mission/fleets/country +0x%zx/+0x%zx/+0x%zx/+0x%zx/+0x%zx, "
+            "available +0x%zx, ids +0x%zx/+0x%zx, strategy list %u (+0x%zx/+0x%zx, target +0x%zx)\n",
+            fleetTrace.groupTarget, fleetTrace.groupSystem, fleetTrace.groupMission, fleetTrace.groupFleetCount,
+            fleetTrace.groupCountry, fleetTrace.availableCount, fleetTrace.systemId, fleetTrace.countryId,
+            fleetTrace.hostileList, fleetTrace.strategiesEntries, fleetTrace.strategiesCount, fleetTrace.entryTarget);
         // The offsets the trace hard-coded before it read them from the code.
         expect("trace group target", fleetTrace.groupTarget, 0x10);
         expect("trace group system", fleetTrace.groupSystem, 0x18);

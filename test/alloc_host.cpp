@@ -24,22 +24,22 @@ extern "C" __declspec(dllimport) const char* AllocTestSummary();
 
 static int g_failures = 0;
 
-#define CHECK(cond)                                                \
-    do {                                                           \
-        if (!(cond)) {                                             \
-            ++g_failures;                                          \
-            printf("FAIL line %d: %s\n", __LINE__, #cond);         \
-        }                                                          \
+#define CHECK(cond)                                                                                                    \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ++g_failures;                                                                                              \
+            printf("FAIL line %d: %s\n", __LINE__, #cond);                                                             \
+        }                                                                                                              \
     } while (0)
 
-static std::vector<std::string> g_static = {"allocated", "before", "main"};  // during CRT start
+static std::vector<std::string> g_static = {"allocated", "before", "main"}; // during CRT start
 
 int main() {
     printf("--- alloc_testdll log\n%s---\n", AllocTestLog());
     CHECK(AllocTestInstalled());
     CHECK(AllocTestOwned(g_static.data()));
-    CHECK(AllocTestPurgeDelay() == 12345);  // from stellaris-engine-fixes.ini
-    CHECK(GetEnvironmentVariableW(L"MIMALLOC_PURGE_DELAY", nullptr, 0) == 0);  // removed again
+    CHECK(AllocTestPurgeDelay() == 12345);                                    // from stellaris-engine-fixes.ini
+    CHECK(GetEnvironmentVariableW(L"MIMALLOC_PURGE_DELAY", nullptr, 0) == 0); // removed again
 
     // malloc, calloc, realloc, free, _msize
     void* p = malloc(100);
@@ -48,16 +48,17 @@ int main() {
     memset(p, 0xAB, 100);
     p = realloc(p, 100000);
     CHECK(p && AllocTestOwned(p) && static_cast<unsigned char*>(p)[99] == 0xAB);
-    CHECK(realloc(p, 0) == nullptr);  // frees, as the CRT's realloc does
+    CHECK(realloc(p, 0) == nullptr); // frees, as the CRT's realloc does
     void* z = malloc(0);
     CHECK(z != nullptr);
     free(z);
     auto c = static_cast<unsigned char*>(calloc(1000, 7));
     bool zero = c != nullptr;
-    for (int i = 0; zero && i < 7000; ++i) zero = c[i] == 0;
+    for (int i = 0; zero && i < 7000; ++i)
+        zero = c[i] == 0;
     CHECK(zero && AllocTestOwned(c));
     free(c);
-    CHECK(calloc(SIZE_MAX / 2, 4) == nullptr);  // overflow
+    CHECK(calloc(SIZE_MAX / 2, 4) == nullptr); // overflow
     free(nullptr);
     void* r = realloc(nullptr, 64);
     CHECK(r && AllocTestOwned(r));
@@ -79,7 +80,8 @@ int main() {
     CHECK(AllocTestOwned(big.get()));
     big.reset();
     std::string grow;
-    for (int i = 0; i < 100000; ++i) grow += 'x';
+    for (int i = 0; i < 100000; ++i)
+        grow += 'x';
     CHECK(AllocTestOwned(grow.data()));
 
     // Blocks from the process heap (as other modules allocate them) still go back to it.
@@ -104,17 +106,22 @@ int main() {
                     x ^= x << 13, x ^= x >> 17, x ^= x << 5;
                     size_t size = (x % 7 == 0) ? (x % 300000) : (x % 512);
                     void* q = (x & 1) ? malloc(size) : calloc(1, size);
-                    if (!q || !AllocTestOwned(q)) ++threadFailures;
-                    if (q && size) static_cast<char*>(q)[size - 1] = 1;
+                    if (!q || !AllocTestOwned(q))
+                        ++threadFailures;
+                    if (q && size)
+                        static_cast<char*>(q)[size - 1] = 1;
                     void* old = shared[x % shared.size()].exchange(q);
-                    if (x & 2) old = realloc(old, size + 16);
+                    if (x & 2)
+                        old = realloc(old, size + 16);
                     free(old);
                 }
             });
         }
-        for (auto& th : threads) th.join();
+        for (auto& th : threads)
+            th.join();
     }
-    for (auto& q : shared) free(q.exchange(nullptr));
+    for (auto& q : shared)
+        free(q.exchange(nullptr));
     CHECK(threadFailures == 0);
 
     printf("%s\n", AllocTestSummary());

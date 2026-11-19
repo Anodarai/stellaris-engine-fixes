@@ -1,4 +1,4 @@
-#include "../src/logging.h"
+#include "../src/core/logging.h"
 
 #include <string>
 
@@ -26,15 +26,17 @@ int main() {
     rewind(file);
     std::string output;
     char buffer[4096];
-    while (size_t size = fread(buffer, 1, sizeof(buffer), file)) output.append(buffer, size);
+    while (size_t size = fread(buffer, 1, sizeof(buffer), file))
+        output.append(buffer, size);
     fclose(file);
 
-    const std::string expected =
-        "2026-11-11T18:30:00.123Z ERROR test | mod\\\\name\\r\\nbad\\t | field\\x11\\x00\n"
-        "2026-11-11T18:30:00.123Z WARN  test | " + longMessage + "\n"
-        "2026-11-11T18:30:00.123Z INFO  test | ready\n"
-        "2026-11-11T18:30:00.123Z DEBUG test | name=caf\xc3\xa9\n"
-        "2026-11-11T18:30:00.123Z STATS test | calls=12 avg_us=5.5\n";
+    const std::string expected = "2026-11-11T18:30:00.123Z ERROR test | mod\\\\name\\r\\nbad\\t | field\\x11\\x00\n"
+                                 "2026-11-11T18:30:00.123Z WARN  test | " +
+                                 longMessage +
+                                 "\n"
+                                 "2026-11-11T18:30:00.123Z INFO  test | ready\n"
+                                 "2026-11-11T18:30:00.123Z DEBUG test | name=caf\xc3\xa9\n"
+                                 "2026-11-11T18:30:00.123Z STATS test | calls=12 avg_us=5.5\n";
     if (output != expected) {
         fprintf(stderr, "Unexpected log output:\n%s", output.c_str());
         return 1;

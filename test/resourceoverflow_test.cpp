@@ -2,12 +2,13 @@
 // Usage: resourceoverflow_test.exe <stellaris.exe> [more builds...]
 #include <cstdio>
 #include <random>
-#include "../src/resourceoverflow.h"
+#include "../src/numeric/economy/resourceoverflow.h"
 
 namespace {
 int failures = 0;
 void Check(bool ok, const char* what) {
-    if (!ok && ++failures <= 20) printf("FAIL %s\n", what);
+    if (!ok && ++failures <= 20)
+        printf("FAIL %s\n", what);
 }
 
 using RoundFn = int64_t (*)(int64_t);
@@ -16,22 +17,29 @@ using RoundFn = int64_t (*)(int64_t);
 // run its position-independent arithmetic, put the result in RAX, restore RBX and return.
 uint8_t* MakeRound(const uint8_t* block, bool situation) {
     auto p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (!p) return nullptr;
+    if (!p)
+        return nullptr;
     const uint8_t prefix[] = {0x53, 0x48, 0x8b, 0xd9}; // push rbx; mov rbx,rcx
     memcpy(p, prefix, sizeof(prefix));
     size_t n = sizeof(prefix);
     if (situation) {
-        memcpy(p + n, block, 36); n += 36; // through imul r9,rax,100000
+        memcpy(p + n, block, 36);
+        n += 36;                                     // through imul r9,rax,100000
         const uint8_t result[] = {0x49, 0x8b, 0xc1}; // mov rax,r9
-        memcpy(p + n, result, sizeof(result)); n += sizeof(result);
+        memcpy(p + n, result, sizeof(result));
+        n += sizeof(result);
     } else {
-        memcpy(p + n, block + 58, 27); n += 27; // through add rdx,rax
+        memcpy(p + n, block + 58, 27);
+        n += 27; // through add rdx,rax
         // Skip resource-table addressing, which is not part of the rounding arithmetic.
-        memcpy(p + n, block + resourceoverflow::kStockpileNarrow, 10); n += 10;
+        memcpy(p + n, block + resourceoverflow::kStockpileNarrow, 10);
+        n += 10;
         const uint8_t result[] = {0x48, 0x8b, 0xc1}; // mov rax,rcx
-        memcpy(p + n, result, sizeof(result)); n += sizeof(result);
+        memcpy(p + n, result, sizeof(result));
+        n += sizeof(result);
     }
-    p[n++] = 0x5b; p[n++] = 0xc3; // pop rbx; ret
+    p[n++] = 0x5b;
+    p[n++] = 0xc3; // pop rbx; ret
     DWORD old;
     if (!VirtualProtect(p, 4096, PAGE_EXECUTE_READ, &old) || !FlushInstructionCache(GetCurrentProcess(), p, n)) {
         VirtualFree(p, 0, MEM_RELEASE);
@@ -45,8 +53,10 @@ void CheckArithmetic(const uint8_t* original, const uint8_t* patched, bool situa
     uint8_t* newCode = MakeRound(patched, situation);
     Check(oldCode && newCode, "allocate executable rounding snippets");
     if (!oldCode || !newCode) {
-        if (oldCode) VirtualFree(oldCode, 0, MEM_RELEASE);
-        if (newCode) VirtualFree(newCode, 0, MEM_RELEASE);
+        if (oldCode)
+            VirtualFree(oldCode, 0, MEM_RELEASE);
+        if (newCode)
+            VirtualFree(newCode, 0, MEM_RELEASE);
         return;
     }
     auto oldRound = reinterpret_cast<RoundFn>(oldCode);
@@ -64,16 +74,31 @@ void CheckArithmetic(const uint8_t* original, const uint8_t* patched, bool situa
         if (units >= INT32_MIN && units <= INT32_MAX)
             Check(newRound(raw) == oldRound(raw), "ordinary-scale result unchanged");
     };
-    const int64_t values[] = {
-        INT64_MIN, INT64_MIN + 1, INT64_MAX - 1, INT64_MAX,
-        -2147483649LL * 100000, -2147483648LL * 100000 - 99999,
-        -2147483648LL * 100000, -2147483648LL * 100000 + 1,
-        2147483647LL * 100000, 2147483648LL * 100000 - 1,
-        2147483648LL * 100000, 2147483648LL * 100000 + 99999,
-        4294967296LL * 100000, -4294967296LL * 100000,
-        -100001, -100000, -99999, -1, 0, 1, 99999, 100000, 100001
-    };
-    for (int64_t value : values) sample(value);
+    const int64_t values[] = {INT64_MIN,
+                              INT64_MIN + 1,
+                              INT64_MAX - 1,
+                              INT64_MAX,
+                              -2147483649LL * 100000,
+                              -2147483648LL * 100000 - 99999,
+                              -2147483648LL * 100000,
+                              -2147483648LL * 100000 + 1,
+                              2147483647LL * 100000,
+                              2147483648LL * 100000 - 1,
+                              2147483648LL * 100000,
+                              2147483648LL * 100000 + 99999,
+                              4294967296LL * 100000,
+                              -4294967296LL * 100000,
+                              -100001,
+                              -100000,
+                              -99999,
+                              -1,
+                              0,
+                              1,
+                              99999,
+                              100000,
+                              100001};
+    for (int64_t value : values)
+        sample(value);
     std::mt19937_64 rng(3);
     for (int i = 0; i < 100000; ++i) {
         uint64_t bits = rng();
@@ -94,13 +119,20 @@ void CheckArithmetic(const uint8_t* original, const uint8_t* patched, bool situa
 void CheckBuild(const char* path) {
     HMODULE mod = LoadLibraryExA(path, nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
     Check(mod != nullptr, "map executable as image resource");
-    if (!mod) { printf("  %s: Windows error %lu\n", path, GetLastError()); return; }
+    if (!mod) {
+        printf("  %s: Windows error %lu\n", path, GetLastError());
+        return;
+    }
     auto base = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(mod) & ~uintptr_t(3));
     locate::Image img = locate::Describe(base);
     std::string error;
     uint8_t* at = resourceoverflow::Locate(img, error);
     Check(at != nullptr, "unique complete AddResource pattern");
-    if (!at) { printf("  %s: %s\n", path, error.c_str()); FreeLibrary(mod); return; }
+    if (!at) {
+        printf("  %s: %s\n", path, error.c_str());
+        FreeLibrary(mod);
+        return;
+    }
     printf("%s: rounding block +%llX\n", path, static_cast<unsigned long long>(at - base));
     uint8_t patched[resourceoverflow::kSize];
     Check(resourceoverflow::Prepare(at, patched), "prepare both patches");
@@ -128,8 +160,12 @@ void CheckBuild(const char* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: resourceoverflow_test <stellaris.exe> [more builds...]\n"); return 2; }
-    for (int i = 1; i < argc; ++i) CheckBuild(argv[i]);
+    if (argc < 2) {
+        printf("usage: resourceoverflow_test <stellaris.exe> [more builds...]\n");
+        return 2;
+    }
+    for (int i = 1; i < argc; ++i)
+        CheckBuild(argv[i]);
     printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

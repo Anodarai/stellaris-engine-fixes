@@ -10,8 +10,16 @@ The default configuration enables interface improvements, performance changes, t
 
 | Setting | Default | Effect |
 |---|---:|---|
+| `remember_contacts_scroll` | `1` | Restores the Contacts list's scroll position. Closing Diplomacy returns to Contacts when Contacts opened it. |
+| `view_navigation` | `1` | Use the arrows, Tab or Shift+Tab to cycle through fleets of the same class, megastructures, and empires in Diplomacy. |
 | `trade_amount_entry` | `1` | Alt-click an amount or its **+** or **−** button in an empire deal or the market's monthly trade window to enter an amount in the game's text popup. The input receives keyboard focus automatically. |
 | `planet_queue_first` | `1` | Ctrl-click when adding planet construction to place the new item at the front of that planet's queue. This shortcut is disabled in multiplayer. |
+| `text_selection` | `1` | Enables Ctrl+A to select all text and left-button drag to select part of it. Password boxes use keyboard selection. |
+| `starbase_templates` | `1` | Adds the Templates panel to owned stations in single player. Requires `[script_storage] enabled=1`. The optional launcher mod [styles the panel](../README.md#starbase-templates-ui). |
+| `starbase_autoupgrade` | `1` | Adds a per-starbase toggle for monthly defense platform upgrades. Requires `starbase_templates=1` and single player. |
+| `shipyard_reinforce_toggle` | `1` | Adds a per-shipyard checkbox that controls whether automatic fleet reinforcement can use it. Requires `starbase_templates=1` and single player. |
+| `ship_design_library` | `1` | Adds the Design library button to the ship designer. Requires `starbase_templates=1` and `[script_storage] enabled=1`. Saving and deleting library entries are available in single player. |
+| `ship_design_library_x`, `ship_design_library_y` | `445`, `0` | Adjust the button position in pixels within the ship designer. |
 
 Fleet and megastructure outliner sorting currently have no individual configuration switches. They remain enabled while the DLL is installed and their required hooks are available.
 

@@ -27,6 +27,23 @@ to get the DLL, its configuration file and the optional launcher mods described 
   deal or the market's monthly trade window to type a number directly into a focused input.
 - **Construction priority:** Ctrl-click to add a new construction item at the front of a
   planet's queue; this shortcut is available in single player only.
+- **Contacts and view navigation:** Contacts remembers where you scrolled and reopens when you
+  close a Diplomacy view you opened from it. Use the arrows, Tab or Shift+Tab to cycle through
+  fleets of the same class, megastructures and empires in Diplomacy.
+- **Text selection:** Ctrl+A selects all text in an input box. Drag with the left mouse button to
+  select part of the text. Password boxes use keyboard selection.
+- **Starbase templates:** Save a layout for the current campaign or across campaigns, or build a
+  new template in the editor. Apply queues construction as slots and requirements become
+  available. Use **Copy code** and **Paste code** to share layouts. The panel supports owned
+  starbases, orbital rings, deep space citadels and waystations in single player. The optional
+  [Starbase Templates UI](#starbase-templates-ui) styles the panel.
+- **Starbase controls:** Toggle monthly defense platform upgrades on the Defenses tab and choose
+  whether a shipyard can be used for automatic fleet reinforcement on the Shipyard tab. Both
+  features are available in single player.
+- **Ship design library:** Save the open design to a library shared across campaigns. Loading it
+  starts a new design and reports parts that are missing or unavailable to your empire.
+
+Templates, build plans and library data use the `sefdata` stores.
 
 ### Performance
 
@@ -157,19 +174,37 @@ It requires Gigastructural Engineering, this DLL and `[script_storage] enabled=1
 load after Gigastructural Engineering in the launcher. Preset loading is available in single
 player only because replaying stored script is disabled in multiplayer.
 
+### Starbase Templates UI
+
+[Starbase Templates: Styled Panel (stellaris-engine-fixes)](mods/sef_starbase_templates_ui)
+is an optional launcher mod for Stellaris 4.5. It gives the template list, editor and component
+picker a dark backdrop, a highlighted **Apply** button, left-aligned rows with a tinted
+selection, and frameless page and status labels. It uses Stellaris sprites, so changes another
+UI mod makes to those sprites can also appear in this panel.
+
+Install `sef_starbase_templates_ui` using the instructions below. Enable it in your playset
+with the DLL installed beside `stellaris.exe`, `[interface]` `starbase_templates=1`, and
+`[script_storage]` `enabled=1`. In a single-player game, open an owned starbase and choose
+**Starbase → Templates**.
+
+The panel uses its basic styling when the launcher mod is disabled. To check that the DLL
+found the skin, look for `panel look: content mod, 7 of 7 button types` under
+`starbase_templates` in `stellaris-engine-fixes.log`. The launcher mod only ships GUI
+definitions. In-game validation of the styled panel is pending.
+
 ### Install an included mod
 
 1. Copy the chosen mod folder from the ZIP's `mods` folder into
    `Documents\Paradox Interactive\Stellaris\mod\`.
 2. Copy that folder's `descriptor.mod` into the parent `mod` directory and rename the copy
-   to match the folder, for example `sef_ai_expansion.mod` or `sef_giga_user_preset.mod`.
+   to match the folder, for example `sef_starbase_templates_ui.mod`.
 3. Open the renamed copy in a text editor and add the matching path line:
 
    ```text
-   path="mod/sef_ai_expansion"
+   path="mod/sef_starbase_templates_ui"
    ```
 
-   For the preset mod, use `path="mod/sef_giga_user_preset"` instead. Leave the original
-   `descriptor.mod` inside the mod folder in place.
+   For the other mods, use the matching folder name, `sef_ai_expansion` or `sef_giga_user_preset`.
+   Leave the original `descriptor.mod` inside the mod folder in place.
 4. Restart the launcher, add the mod to your playset and enable it. For the preset mod, also
    enable Gigastructural Engineering and place the preset mod after it.

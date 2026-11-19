@@ -3,7 +3,7 @@
 #define SEF_HOST_EXE L"alloc_host.exe"
 #include <cstdarg>
 
-#include "../src/allocator.h"
+#include "../src/performance/allocator.h"
 
 static std::string g_text;
 
@@ -21,10 +21,18 @@ static void TestLog(LogLevel level, const char* component, const char* fmt, ...)
     g_text += '\n';
 }
 
-extern "C" __declspec(dllexport) const char* AllocTestLog() { return g_text.c_str(); }
-extern "C" __declspec(dllexport) bool AllocTestInstalled() { return alloc::g_status.installed; }
-extern "C" __declspec(dllexport) bool AllocTestOwned(const void* p) { return mi_is_in_heap_region(p); }
-extern "C" __declspec(dllexport) long AllocTestPurgeDelay() { return mi_option_get(mi_option_purge_delay); }
+extern "C" __declspec(dllexport) const char* AllocTestLog() {
+    return g_text.c_str();
+}
+extern "C" __declspec(dllexport) bool AllocTestInstalled() {
+    return alloc::g_status.installed;
+}
+extern "C" __declspec(dllexport) bool AllocTestOwned(const void* p) {
+    return mi_is_in_heap_region(p);
+}
+extern "C" __declspec(dllexport) long AllocTestPurgeDelay() {
+    return mi_option_get(mi_option_purge_delay);
+}
 extern "C" __declspec(dllexport) unsigned long long AllocTestForeign() {
     return alloc::g_foreignFrees + alloc::g_foreignReallocs + alloc::g_foreignSizes;
 }

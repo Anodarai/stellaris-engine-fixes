@@ -36,9 +36,9 @@ inline constexpr MultiplySpec kMultiply[] = {
      "49 8B C8 4C 3B C2 48 0F 4C CA 4C 0F 4F C2 48 BE 09 E1 D1 C6 11 6B F1 29 48 8B C6 48 F7 E9 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 48 69 C2 A0 86 01 00 48 2B C8 49 0F AF C8 4C 0F AF C2 48 8B C6 48 F7 E9 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 49 03 D0"},
     {1,0x12b3,6,78,&numericpatch::Context::r9,&numericpatch::Context::rdx,&numericpatch::Context::rbx,nullptr,
      "49 8B C9 4C 3B CA 48 0F 4C CA 4C 0F 4F CA 48 8B C6 48 F7 E9 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 48 69 C2 A0 86 01 00 48 2B C8 49 0F AF C9 4C 0F AF CA 48 8B C6 48 F7 E9 48 8B DA 48 C1 FB 0E 48 8B C3 48 C1 E8 3F 48 03 D8 49 03 D9"},
-    {1,0x134f,6,88,&numericpatch::Context::r9,&numericpatch::Context::rdx,&numericpatch::Context::rbx,&numericpatch::Context::r8,
-     "49 8B C9 4C 3B CA 48 0F 4C CA 4C 0F 4F CA 49 B8 09 E1 D1 C6 11 6B F1 29 49 8B C0 48 F7 E9 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 48 69 C2 A0 86 01 00 48 2B C8 49 0F AF C9 4C 0F AF CA 49 8B C0 48 F7 E9 48 8B DA 48 C1 FB 0E 48 8B C3 48 C1 E8 3F 48 03 D8 49 03 D9"},
-    {1,0x147b,6,88,&numericpatch::Context::r9,&numericpatch::Context::rcx,&numericpatch::Context::rdx,&numericpatch::Context::r10,
-     "4D 8B C1 4C 3B C9 4C 0F 4C C1 4C 0F 4F C9 49 BA 09 E1 D1 C6 11 6B F1 29 49 8B C2 49 F7 E8 48 8B CA 48 C1 F9 0E 48 8B C1 48 C1 E8 3F 48 03 C8 48 69 C1 A0 86 01 00 4C 2B C0 4D 0F AF C1 49 0F AF C9 49 8B C2 49 F7 E8 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 48 03 D1"},
+    {1,0x134f,6,91,&numericpatch::Context::r9,&numericpatch::Context::rdx,&numericpatch::Context::rbx,&numericpatch::Context::r8,
+     "49 8B C9 4C 3B CA 48 0F 4C CA 4C 0F 4F CA 49 B8 09 E1 D1 C6 11 6B F1 29 49 8B C0 48 F7 E9 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 48 69 C2 A0 86 01 00 48 2B C8 49 0F AF C9 4C 0F AF CA 49 8B C0 48 F7 E9 48 8B DA 48 C1 FB 0E 48 8B C3 48 C1 E8 3F 48 03 D8 49 03 D9 48 F7 DB",diplomacyoverflow::After::Negate,nullptr},
+    {1,0x147b,6,91,&numericpatch::Context::r9,&numericpatch::Context::rcx,&numericpatch::Context::rdx,&numericpatch::Context::r10,
+     "4D 8B C1 4C 3B C9 4C 0F 4C C1 4C 0F 4F C9 49 BA 09 E1 D1 C6 11 6B F1 29 49 8B C2 49 F7 E8 48 8B CA 48 C1 F9 0E 48 8B C1 48 C1 E8 3F 48 03 C8 48 69 C1 A0 86 01 00 4C 2B C0 4D 0F AF C1 49 0F AF C9 49 8B C2 49 F7 E8 48 C1 FA 0E 48 8B C2 48 C1 E8 3F 48 03 D0 48 03 D1 48 03 DA",diplomacyoverflow::After::AddTo,&numericpatch::Context::rbx},
 };
 } // namespace diplomacyoverflow

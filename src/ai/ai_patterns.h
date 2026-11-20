@@ -180,12 +180,13 @@ constexpr char kPlanWalkContinue[] = "48 8B 4C 24 ?? 48 8B 95 ?? ?? ?? ?? 41 FF 
 
 // BuildColonizer: the end of a colony fleet's order walk (an order type compared, the next order
 // taken, its vtable asked), then the idle fleet's ships added: mov eax,[rdi+ships] (+30, the
-// offset +32), add r15d,eax (+36), and the code after them (+39).
+// offset +32), add r15d,eax (+36), and the code after them (+39). The game also jumps to the add
+// (eax = another fleet's count), so only the 6-byte mov is replaced.
 constexpr char kColonizerIdle[] =
     "81 7B 18 ?? ?? 00 00 0F 84 ?? ?? ?? ?? 48 8B 5B 08 48 8B 03 48 8B CB FF 50 38 84 C0 75 ?? 8B 87 ?? ?? ?? ?? "
     "44 03 F8 4C 8B 05";
 
-constexpr size_t kColonizerIdleBytes = 9;
+constexpr size_t kColonizerIdleBytes = 6;
 
 // MonthlyUpdate: the month read, country id % 12 (by multiplication), r14d = 0, then
 // cmp ecx,r8d; jne +4 (+34); mov [rsi+count],r14d.

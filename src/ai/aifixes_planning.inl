@@ -272,10 +272,9 @@ void InstallColonizerFix(int days) {
     c.Put({0xFF, 0xD0});                                                        // call rax
     c.Put({0x48, 0x83, 0xC4, 0x20});                                            // add rsp,20h
     c.Put({0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x59});                          // pop r11, r10, r9, rcx
-    c.Put({0x44, 0x03, 0xF8});                                                  // add r15d,eax
-    c.Put({0xE9}).Put32(0);                                                     // jmp back
+    c.Put({0xE9}).Put32(0); // jmp back to the game's add r15d,eax, which another path jumps to
     uint8_t* stub = AllocNear(at, c.n);
-    uint8_t patch[locate::kColonizerIdleBytes] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};
+    uint8_t patch[locate::kColonizerIdleBytes] = {0xE9, 0, 0, 0, 0, 0x90}; // replaces mov eax,[rdi+ships]
     int32_t back, to;
     if (!stub || !Rel32(stub + c.n, at + sizeof(patch), &back) || !Rel32(at + 5, stub, &to)) {
         Log(LogLevel::Error, "ai_colony_ships", "no memory near the game's code; off");

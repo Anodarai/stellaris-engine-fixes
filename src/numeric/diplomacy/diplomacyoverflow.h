@@ -4,10 +4,20 @@
 #include "diplomacy_patterns.h"
 namespace diplomacyoverflow {
 using Register = uint64_t numericpatch::Context::*;
+// What the game does with a product right after the multiplication, when that instruction is in
+// the multiplication's block: the game branches to the instruction after it, so it cannot have a
+// block of its own (the entry jump would cover the branch target).
+enum class After {
+    None,
+    Negate, // NEG result
+    AddTo   // ADD target,result
+};
 struct MultiplySpec {
     size_t function, offset, stolen, span;
     Register a, b, result, magic;
     const char* pattern;
+    After after = After::None;
+    Register target = nullptr;
 };
 enum class Kind {
     ModifierR9,
@@ -20,8 +30,7 @@ enum class Kind {
     FinalBase,
     ModifierTotal,
     Envoys,
-    NegativeBorrow,
-    BorrowTotal,
+    BorrowStore,
     EconomicConversion
 };
 struct SimpleSpec {
@@ -46,20 +55,42 @@ struct Locations {
     numericpatch::Block blocks[kBlockCount];
     SimpleData simple[kSimpleCount];
 };
+// The product, then the instruction after it (`After`), applied to `out`; `before` holds the inputs.
+inline void Product(const MultiplySpec& s, numericpatch::Context& out, const numericpatch::Context& before) {
+    int64_t result =
+        numeric::MulDiv(static_cast<int64_t>(before.*s.a), s.b ? static_cast<int64_t>(before.*s.b) : 1000000, 100000);
+    out.*s.result = static_cast<uint64_t>(result);
+    if (s.after == After::Negate)
+        out.*s.result = static_cast<uint64_t>(numeric::Negate(result));
+    else if (s.after == After::AddTo)
+        out.*s.target = static_cast<uint64_t>(numeric::Add(static_cast<int64_t>(before.*s.target), result));
+}
 inline bool Multiply(numericpatch::Context& c, const void* data) {
     const auto& s = *static_cast<const MultiplySpec*>(data);
-    int64_t result =
-        numeric::MulDiv(static_cast<int64_t>(c.*s.a), s.b ? static_cast<int64_t>(c.*s.b) : 1000000, 100000);
+    numericpatch::Context before = c;
     if (s.magic)
         c.*s.magic = UINT64_C(0x29f16b11c6d1e109);
-    c.*s.result = static_cast<uint64_t>(result);
+    Product(s, c, before);
     return true;
 }
 inline bool ReplayMultiply(numericpatch::Context& out, const numericpatch::Context& before, const void* data) {
-    const auto& s = *static_cast<const MultiplySpec*>(data);
-    out.*s.result = static_cast<uint64_t>(
-        numeric::MulDiv(static_cast<int64_t>(before.*s.a), s.b ? static_cast<int64_t>(before.*s.b) : 1000000, 100000));
+    Product(*static_cast<const MultiplySpec*>(data), out, before);
     return true;
+}
+// The flags TEST value,value leaves: CF and OF clear, ZF, SF and PF from the value.
+inline uint64_t TestFlags(uint64_t flags, uint64_t value) {
+    flags &= ~uint64_t(0x8c5);
+    if (value == 0)
+        flags |= 0x40;
+    if (value >> 63)
+        flags |= 0x80;
+    uint8_t low = static_cast<uint8_t>(value);
+    low ^= low >> 4;
+    low ^= low >> 2;
+    low ^= low >> 1;
+    if (!(low & 1))
+        flags |= 0x04;
+    return flags;
 }
 inline int64_t& Memory(uint64_t address) {
     return *reinterpret_cast<int64_t*>(address);
@@ -130,19 +161,12 @@ inline bool Simple(numericpatch::Context& c, const void* data) {
         c.rdi = static_cast<uint64_t>(count * 100000);
         break;
     }
-    case Kind::NegativeBorrow:
-        c.rbx = numeric::Negate(static_cast<int64_t>(c.rbx));
-        c.rcx = c.rdi;
+    case Kind::BorrowStore:
+        // ADD [R13],RBX; TEST R12,R12. The game also branches here, past the ADD RBX,RDX before
+        // it (which is in the preceding multiplication's block).
+        Memory(c.r13) = numeric::Add(Memory(c.r13), static_cast<int64_t>(c.rbx));
+        c.flags = TestFlags(c.flags, c.r12);
         break;
-    case Kind::BorrowTotal: {
-        numeric::Sum sum;
-        sum.Add(static_cast<int64_t>(c.rbx));
-        sum.Add(static_cast<int64_t>(c.rdx));
-        c.rbx = static_cast<uint64_t>(sum.Clamp());
-        sum.Add(Memory(c.r13));
-        Memory(c.r13) = sum.Clamp();
-        break;
-    }
     case Kind::EconomicConversion:
         c.rcx = static_cast<uint64_t>(numeric::BinaryToDecimal(static_cast<int64_t>(c.r8)));
         break;

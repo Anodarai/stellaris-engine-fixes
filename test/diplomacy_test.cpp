@@ -38,10 +38,12 @@ void MultiplyTest(const diplomacyoverflow::MultiplySpec& spec, const numericpatc
     Check(memory != nullptr, "allocate native fixture");
     if (!memory)
         return;
+    // A block that also adds the product to another register is checked on that register.
+    auto returned = spec.after == diplomacyoverflow::After::AddTo ? spec.target : spec.result;
     auto body = Prologue();
     size_t at = body.b.size();
     body.b.insert(body.b.end(), live.at, live.at + live.span);
-    Tail(body, spec.result);
+    Tail(body, returned);
     memcpy(memory, body.b.data(), body.b.size());
     memcpy(memory + 4096, body.b.data(), body.b.size());
     numericpatch::Block block;
@@ -83,8 +85,14 @@ void MultiplyTest(const diplomacyoverflow::MultiplySpec& spec, const numericpatc
                       {INT64_MAX, 200000},
                       {INT64_MIN, -100000}}) {
         C c = setup(pair.first, pair.second);
-        Check(fixed(&c) == numeric::MulDiv(pair.first, spec.b ? pair.second : 1000000, 100000),
-              "diplomatic multiply boundary");
+        C want = c;
+        diplomacyoverflow::Product(spec, want, c);
+        Check(static_cast<int64_t>(want.*spec.result) ==
+                  (spec.after == diplomacyoverflow::After::Negate
+                       ? numeric::Negate(numeric::MulDiv(pair.first, spec.b ? pair.second : 1000000, 100000))
+                       : numeric::MulDiv(pair.first, spec.b ? pair.second : 1000000, 100000)),
+              "diplomatic multiply expected value");
+        Check(fixed(&c) == static_cast<int64_t>(want.*returned), "diplomatic multiply boundary");
     }
     C c = spec.b ? setup(100, -1000000000000000000LL) : setup(INT64_MAX, 1000000);
     Check(original(&c) != fixed(&c), "original signed slow-path failure reproduced");
@@ -121,13 +129,24 @@ void SumTests() {
     Memory(c.rbp + 0x58) = -100000;
     Simple(c, &data);
     Check(static_cast<int64_t>(c.r8) == INT64_MAX, "modifier exact cancellation");
-    spec.kind = Kind::BorrowTotal;
+    spec.kind = Kind::BorrowStore;
     result = INT64_MAX;
     c.r13 = reinterpret_cast<uint64_t>(&result);
-    c.rbx = INT64_MAX;
-    c.rdx = static_cast<uint64_t>(-INT64_MAX);
+    c.rbx = 5;
+    c.r12 = 0;
+    c.flags = 0x8c5 | 0x202;
     Simple(c, &data);
-    Check(result == INT64_MAX, "borrow sum cancellation");
+    Check(result == INT64_MAX, "borrow store saturates");
+    Check(c.flags == (0x202 | 0x40 | 0x04), "borrow store sets TEST flags for zero");
+    result = -INT64_MAX;
+    c.rbx = static_cast<uint64_t>(-INT64_MAX);
+    c.r12 = UINT64_C(0x8000000000000003);
+    Simple(c, &data);
+    Check(result == INT64_MIN, "borrow store saturates below");
+    Check(c.flags == (0x202 | 0x80 | 0x04), "borrow store sets TEST flags for a negative value");
+    c.r12 = 1;
+    Simple(c, &data);
+    Check(c.flags == 0x202, "borrow store sets TEST flags for odd parity");
     spec.kind = Kind::Envoys;
     c.rax = INT32_MAX;
     c.rcx = INT32_MAX;
